@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a12556-d9d4-7ad2-bcd5-ec55e9a199ac"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"**Defining reliability criteria**\n**Setting reliability weights**"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"- **Set a fair test:** Pick a few small tasks with answers you can verify, and give each peer the same instructions and deadline. This makes correctness comparable without consuming much of the hour.\n- **Test more than once:** Send tasks in separate files and ask for answers before sharing other peers’ results. Repetition helps distinguish steady reliability from a lucky guess, though it costs time.\n- **Verify and rank:** Check answers against known results; score correctness first, then timely completion and consistency. Keep the test short enough to leave time to read the replies."}}
+{"type":"turn.completed","usage":{"input_tokens":13472,"cached_input_tokens":11008,"cache_write_input_tokens":0,"output_tokens":299,"reasoning_output_tokens":180}}

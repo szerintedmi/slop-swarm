@@ -1,0 +1,5 @@
+name: thistle
+runtime: claude            # claude | codex
+model: claude-haiku-5-5
+effort: medium
+# budget_usd: 3            # optional override of budgets.per_agent_usd

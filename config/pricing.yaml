@@ -1,0 +1,36 @@
+# API-equivalent list prices, USD per million tokens. Cost is computed per API request.
+# Prompt tokens = fresh input + cache read + cache write. A tier applies to the WHOLE request
+# when its prompt size is above `above_prompt_tokens` (highest matching tier wins).
+models:
+  claude-haiku-5-5:
+    provider: anthropic
+    per_mtok:
+      input: 0.10
+      output: 0.50
+      cache_read: 0.01        # 0.1x input
+      cache_write_5m: 0.125   # 1.25x input
+      cache_write_1h: 0.20    # 2x input (subscription traffic uses the 1h TTL)
+    tiers:
+      - above_prompt_tokens: 100000
+        multiplier: 5
+    tool_fees_usd:
+      web_search: 0.01        # per search ($10 / 1K)
+    output_includes_reasoning: true   # thinking tokens are billed inside output_tokens
+    # Derived 2026-10-10 from Claude Code's own total_cost_usd (test/fixtures/claude-hi.jsonl).
+
+  gpt-6-luna:
+    provider: openai
+    per_mtok:
+      input: 0.10
+      output: 0.50
+      cache_read: 0.01        # cached input, 0.1x
+      cache_write_5m: 0.125   # 1.25x input; OpenAI bills cache writes for this model
+      cache_write_1h: 0.125
+    tiers:
+      - above_prompt_tokens: 272000   # "long context": whole request at 2x input/cache, 1.5x output
+        input_multiplier: 2
+        output_multiplier: 1.5
+    tool_fees_usd:
+      web_search: 0.01        # $10 / 1K calls; search content tokens are billed as normal input
+    output_includes_reasoning: true   # verified: total_tokens = input + output (pre-flight §11.5)
+    # Source: developers.openai.com/api/docs/models/gpt-6-luna and /api/docs/pricing, checked 2026-10-10.

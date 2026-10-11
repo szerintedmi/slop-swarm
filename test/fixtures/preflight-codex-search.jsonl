@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a12587-35bd-7ef3-b21e-2abea134d195"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"exec-e3135960-e87d-45d2-91f8-d21868a27337","type":"web_search","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"exec-e3135960-e87d-45d2-91f8-d21868a27337","type":"web_search","query":"https://www.bbc.com","action":{"type":"open_page","url":"https://www.bbc.com"},"results":[{"type":"text_result","ref_id":"turn0view0","snippet":"Total lines: 1","title":"Internal Error"}]}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":""}}
+{"type":"turn.completed","usage":{"input_tokens":14283,"cached_input_tokens":8704,"cache_write_input_tokens":0,"output_tokens":46,"reasoning_output_tokens":0}}

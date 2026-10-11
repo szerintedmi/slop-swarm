@@ -1,0 +1,22 @@
+# Long-lived infrastructure only: the internal network and the egress proxy.
+# Agent containers are started per wake by the controller (src/docker.ts).
+name: slopswarm
+
+services:
+  proxy:
+    build: ./proxy
+    image: slopswarm-proxy:latest
+    container_name: slopswarm-proxy
+    restart: unless-stopped
+    volumes:
+      - ./proxy/filter:/etc/tinyproxy/filter:ro   # generated from network.allowlist (src/proxy.ts)
+    networks:
+      - internal
+      - egress
+
+networks:
+  internal:
+    name: slopswarm-internal
+    internal: true     # no route out except through the proxy
+  egress:
+    name: slopswarm-egress

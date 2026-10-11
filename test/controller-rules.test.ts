@@ -1,0 +1,176 @@
+import { describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { loadSwarm, parseSwarm, swarmFromSnapshot } from "../src/config.ts";
+import { isDepleted, overLimit, wakeLimit } from "../src/controller/budget.ts";
+import { fillSeed, humanDuration, makeRunId, wakeNote } from "../src/controller/run.ts";
+import { messagePull, parseNextWake, pickDue, planNextWake } from "../src/controller/scheduler.ts";
+import { wakeStopAt } from "../src/controller/wake.ts";
+
+const MIN = 60_000;
+const sched = { maxSleepMs: 15 * MIN, maxConcurrentWakes: 3 };
+
+describe("config", () => {
+  test("all shipped swarm configs load", () => {
+    for (const f of ["swarm", "smoke"]) {
+      const c = loadSwarm(`config/${f}.yaml`);
+      expect(c.agents.length).toBeGreaterThan(0);
+      expect(c.network.allowlist).toContain("api.anthropic.com");
+    }
+    const smoke = loadSwarm("config/smoke.yaml");
+    expect(smoke.agents.map((a) => a.runtime)).toEqual(["claude", "codex", "codex"]);
+    expect(smoke.scheduler.maxConcurrentWakes).toBe(3); // defaults to the number of agents
+    expect(smoke.budgets.swarmUsd).toBeGreaterThanOrEqual(smoke.agents.length * smoke.budgets.perAgentUsd);
+  });
+
+  test("snapshot round-trips", () => {
+    const c = loadSwarm("config/swarm.yaml");
+    const r = swarmFromSnapshot(c.snapshot);
+    expect(r.agents).toEqual(c.agents);
+    expect(r.budgets).toEqual(c.budgets);
+    expect(r.scheduler).toEqual(c.scheduler);
+  });
+
+  const base = () => ({
+    run: { name: "t", max_duration_min: 60 },
+    agents: ["a1"],
+    budgets: { swarm_usd: 1, per_agent_usd: 0.5, per_wake: { max_usd: 0.1, max_turns: 5, timeout_min: 1 } },
+    scheduler: { max_sleep_min: 15 },
+    network: { name: "n", proxy: "http://p:8888", allowlist: ["api.anthropic.com"] },
+  });
+  const agent = (o: object = {}) => ({ name: "a1", runtime: "claude", model: "claude-haiku-5-5", ...o });
+
+  test("validation errors", () => {
+    expect(() => parseSwarm(base(), () => agent({ runtime: "gemini" }))).toThrow(/runtime/);
+    expect(() => parseSwarm(base(), () => agent({ name: "Bad Name" }))).toThrow(/name/);
+    expect(() => parseSwarm({ ...base(), agents: ["a--b"] }, () => agent({ name: "a--b" }))).toThrow(/--/);
+    expect(() => parseSwarm({ ...base(), agents: ["ab-"] }, () => agent({ name: "ab-" }))).toThrow(/name/);
+    expect(() => parseSwarm({ ...base(), forge: { poll_s: "soon" } }, () => agent())).toThrow(/forge.poll_s/);
+    expect(() => parseSwarm({ ...base(), run: { name: "t" } }, () => agent())).toThrow(/run.max_duration_min/);
+    expect(() => parseSwarm({ ...base(), agents: ["a1", "a1"] }, () => agent())).toThrow(/duplicate/);
+    expect(() => parseSwarm({ ...base(), scheduler: { max_sleep_min: 120 } }, () => agent())).toThrow(/max_duration/);
+    expect(() => parseSwarm({ ...base(), github: { org: "o", user: "u" } }, () => agent())).toThrow(/github.com, githubusercontent.com/);
+    const net = { ...base().network, allowlist: ["api.anthropic.com", "github.com", "githubusercontent.com"] };
+    expect(() => parseSwarm({ ...base(), network: net, github: { org: "bad org", user: "u" } }, () => agent())).toThrow(/github.org/);
+    expect(parseSwarm({ ...base(), network: net, github: { org: "o", user: "u" } }, () => agent()).github).toEqual({ org: "o", user: "u" });
+    const ok = parseSwarm(base(), () => agent({ budget_usd: 0.25 }));
+    expect(ok.agents[0]!.budgetUsd).toBe(0.25);
+    expect(ok.agents[0]!.effort).toBe("medium");
+    // Optional sections and settings get their defaults.
+    expect(ok.forge).toEqual({ image: "codeberg.org/forgejo/forgejo:16.0.4-rootless", port: 3300, pollMs: 15_000 });
+    expect(ok.run.worldEndGraceMs).toBe(60_000);
+    expect(ok.controller).toMatchObject({ tickMs: 5000, container: { memoryGb: 2 } });
+    expect(ok.github).toBeUndefined();
+  });
+});
+
+describe("scheduler", () => {
+  test("parseNextWake", () => {
+    expect(parseNextWake(undefined)).toBeUndefined();
+    expect(parseNextWake("in_minutes: 30\ncontinue_session: true")).toEqual({ inMinutes: 30, continueSession: true });
+    expect(parseNextWake("in_minutes: '45'")).toEqual({ inMinutes: 45, continueSession: false });
+    expect(parseNextWake("in_minutes: soon")!.error).toMatch(/in_minutes/);
+    expect(parseNextWake(": : :")!.error).toBeDefined();
+    expect(parseNextWake("- a\n- b")!.error).toMatch(/mapping/);
+  });
+
+  test("planNextWake: max_sleep, or earlier if the agent asked", () => {
+    expect(planNextWake(0, undefined, sched)).toEqual({ at: 15 * MIN, trigger: "timer" });
+    expect(planNextWake(0, { inMinutes: 0, continueSession: false }, sched)).toEqual({ at: 0, trigger: "self" });
+    expect(planNextWake(0, { inMinutes: 7, continueSession: false }, sched)).toEqual({ at: 7 * MIN, trigger: "self" });
+    expect(planNextWake(0, { inMinutes: 240, continueSession: false }, sched)).toEqual({ at: 15 * MIN, trigger: "self" });
+    expect(planNextWake(0, { continueSession: true, error: "x" }, sched).trigger).toBe("timer");
+  });
+
+  test("messagePull: wake now, unless already due", () => {
+    expect(messagePull(10 * MIN, { next_wake_at: 15 * MIN })).toBe(10 * MIN);
+    expect(messagePull(10 * MIN, { next_wake_at: 10 * MIN })).toBeNull();
+    expect(messagePull(10 * MIN, { next_wake_at: null })).toBe(10 * MIN);
+  });
+
+  test("pickDue honours status, time and free slots", () => {
+    const agents = [
+      { name: "a", status: "sleeping", next_wake_at: 5 },
+      { name: "b", status: "active", next_wake_at: 1 },
+      { name: "c", status: "paused", next_wake_at: 0 },
+      { name: "d", status: "depleted", next_wake_at: 0 },
+      { name: "e", status: "sleeping", next_wake_at: 100 },
+      { name: "f", status: "sleeping", next_wake_at: 2 },
+    ];
+    expect(pickDue(agents, 10, 0, 3).map((a) => a.name)).toEqual(["b", "f", "a"]);
+    expect(pickDue(agents, 10, 2, 3).map((a) => a.name)).toEqual(["b"]);
+    expect(pickDue(agents, 10, 3, 3)).toEqual([]);
+  });
+
+});
+
+describe("budget", () => {
+  test("wakeLimit picks the tightest limit", () => {
+    expect(wakeLimit(0.5, 3, 20)).toEqual({ usd: 0.5, reason: "budget_wake" });
+    expect(wakeLimit(0.5, 0.2, 20)).toEqual({ usd: 0.2, reason: "budget_agent" });
+    expect(wakeLimit(0.5, 3, 0.1)).toEqual({ usd: 0.1, reason: "budget_swarm" });
+  });
+  test("overLimit and depletion", () => {
+    expect(overLimit(0.49, { usd: 0.5, reason: "budget_wake" })).toBeNull();
+    expect(overLimit(0.51, { usd: 0.5, reason: "budget_wake" })).toBe("budget_wake");
+    expect(isDepleted({ budget_usd: 3, spent_usd: 2.9995 })).toBe(true);
+    expect(isDepleted({ budget_usd: 3, spent_usd: 2.9 })).toBe(false);
+  });
+});
+
+test("run ids are unique even within the same minute", () => {
+  const t = Date.UTC(2026, 9, 10, 10, 55);
+  const ids = new Set(Array.from({ length: 50 }, () => makeRunId("smoke", t)));
+  expect(ids.size).toBeGreaterThan(45);
+  expect([...ids][0]).toMatch(/^20261010-1055-smoke-[0-9a-f]{4}$/);
+});
+
+describe("prompt + status", () => {
+  test("seed placeholders", () => {
+    const seed = fillSeed("You are {name}. Forge {forge_url}. Sleep {max_sleep}.\n", { name: "wren", forgeUrl: "http://f:3000", maxSleepMs: 90 * MIN });
+    expect(seed).toBe("You are wren. Forge http://f:3000. Sleep 1h 30m.\n");
+    expect(humanDuration(45_000)).toBe("45s");
+    expect(humanDuration(60 * MIN)).toBe("1h");
+    // The shipped seed has no placeholder left once filled, and never mentions the world end.
+    const shipped = fillSeed(readFileSync("config/seed.md", "utf8"), { name: "x", forgeUrl: "http://f:3000", maxSleepMs: MIN });
+    expect(shipped).not.toMatch(/\{[a-z_]+\}/);
+    expect(shipped).not.toMatch(/commons|outbox|inbox|STATUS\.md|world ends|until \d/);
+    // Agents are told notifications wake them, so they don't wake just to check.
+    expect(shipped).toContain("wakes you sooner");
+    // The GitHub line is there only when the run has the outlet.
+    expect(shipped).not.toContain("GitHub");
+    const withGh = fillSeed(readFileSync("config/seed.md", "utf8"), { name: "x", forgeUrl: "http://f:3000", maxSleepMs: MIN, github: { org: "o", user: "u" } });
+    expect(withGh).not.toMatch(/\{[a-z_]+\}/);
+    expect(withGh).toContain("github.com/o");
+    expect(withGh).toContain("publish what's useful there\nearly");
+    expect(withGh).toContain("Sign what you publish as x");
+  });
+
+  test("wake note: when, why, budget and limits; unread only when there is some; no world end", () => {
+    const base = {
+      now: Date.UTC(2026, 9, 10, 12), wakeSeq: 3, trigger: "message", resumed: false, unread: 2,
+      budgetUsd: 3, spentUsd: 0.25, wakeLimitUsd: 0.5, maxTurns: 60, stopsAt: Date.UTC(2026, 9, 10, 12, 15),
+    };
+    expect(wakeNote(base)).toBe(
+      [
+        "[Wake 3 at 2026-10-10T12:00:00Z (UTC): new forge notifications.",
+        "Unread forge notifications: 2 (`tea notifications ls --mine`).",
+        "Budget: $2.7500 left of $3.0000.",
+        "This wake is stopped if it spends over $0.5000, makes 60 turns, or is still running at 2026-10-10T12:15:00Z.",
+        "Past wakes' costs: /self/usage.jsonl. Prices: /self/pricing.yaml.]",
+      ].join("\n"),
+    );
+    const first = wakeNote({ ...base, wakeSeq: 1, trigger: "initial", unread: 0 });
+    expect(first).toStartWith("[Wake 1 at 2026-10-10T12:00:00Z (UTC): your first wake.");
+    expect(first).not.toContain("Unread");
+    expect(first).not.toContain("world");
+    expect(wakeNote({ ...base, trigger: "self", resumed: true })).toContain(": the time you chose, continuing your previous session.");
+  });
+
+  test("wakeStopAt: per-wake timeout, or the world end + grace, whichever is first", () => {
+    const end = 60 * MIN;
+    expect(wakeStopAt(0, 10 * MIN, end, MIN)).toEqual({ at: 10 * MIN, atWorldEnd: false });
+    expect(wakeStopAt(55 * MIN, 10 * MIN, end, MIN)).toEqual({ at: 61 * MIN, atWorldEnd: true });
+    expect(wakeStopAt(51 * MIN, 10 * MIN, end, MIN)).toEqual({ at: 61 * MIN, atWorldEnd: false }); // tie: the timeout
+    expect(wakeStopAt(59 * MIN, 10 * MIN, end, 0)).toEqual({ at: 60 * MIN, atWorldEnd: true });
+  });
+});

@@ -1,0 +1,43 @@
+# The 1-hour run: 2× Claude Code + Haiku 5.5, 2× Codex + gpt-6-luna (plan §12).
+run:
+  name: tiny-society
+  max_duration_min: 60
+  world_end_grace_s: 60     # a wake still running at the world end is stopped this long after it
+
+agents: [bramble, thistle, sorrel, wren]   # -> config/agents/<name>.yaml
+
+budgets:
+  swarm_usd: 4
+  per_agent_usd: 1          # agent-visible; overridable per agent
+  per_wake: { max_usd: 0.20, max_turns: 100, timeout_min: 10 }
+
+# An agent wakes when new forge notifications arrive, or max_sleep_min after its last wake;
+# it can ask (next_wake.yaml) to wake earlier.
+scheduler:
+  max_sleep_min: 15
+
+controller:
+  tick_s: 5                 # scheduler poll interval
+  container: { cpus: 1, memory_gb: 2, pids_limit: 256 }
+
+network:
+  name: slopswarm-internal
+  proxy: http://slopswarm-proxy:8888
+  allowlist:                # egress domains (suffix match); default = model APIs only
+    - api.anthropic.com
+    - chatgpt.com
+    - api.openai.com
+    - auth.openai.com
+    - github.com              # the GitHub outlet (github: below); covers api. and uploads.
+    - githubusercontent.com   # raw files, release assets
+
+# The agents' public outlet (plan §4.6): one org, one account they all share. Token: secrets/github/token.
+# Remove this section and the two github domains above to run without it.
+github:
+  org: slop-swarm
+  user: slop-swarm-agents
+
+forge:                      # the run's Forgejo, the agents' shared world (plan §4.5)
+  image: codeberg.org/forgejo/forgejo:16.0.4-rootless
+  port: 3300                # your view: http://127.0.0.1:3300 (FORGE_PORT=… overrides)
+  poll_s: 5                 # how often sleeping agents' unread notifications are checked

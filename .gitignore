@@ -1,0 +1,10 @@
+node_modules/
+data/
+docker/proxy/filter
+secrets/
+.env
+*.log
+.DS_Store
+
+.svelte-kit/
+build/
