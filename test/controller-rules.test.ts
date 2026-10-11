@@ -19,8 +19,8 @@ describe("config", () => {
       expect(c.network.allowlist).toContain("api.anthropic.com");
     }
     const smoke = loadSwarm("config/smoke.yaml");
-    expect(smoke.agents.map((a) => a.harness)).toEqual(["claude", "codex", "codex"]);
-    expect(smoke.scheduler.maxConcurrentWakes).toBe(3); // defaults to the number of agents
+    expect(smoke.agents.map((a) => a.harness)).toEqual(["claude", "codex", "codex", "pi"]);
+    expect(smoke.scheduler.maxConcurrentWakes).toBe(4); // defaults to the number of agents
     expect(smoke.budgets.swarmUsd).toBeGreaterThanOrEqual(smoke.agents.length * smoke.budgets.perAgentUsd);
   });
 

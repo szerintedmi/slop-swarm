@@ -35,7 +35,7 @@ export const SEARCH_IMAGE = `slopswarm-search:${new Bun.CryptoHasher("sha256")
 
 /** The one line of the system prompt that tells an agent how to search (only for `search: relay`). */
 export const SEARCH_PROMPT_LINE =
-  'Web search: `websearch "query"` (options: --n N results, --domain D, --since YYYY-MM-DD, --news); each search is billed to your budget (see /self/pricing.yaml).\n';
+  'Web search, a shell command (run it with bash): `websearch "query"` (options: --n N results, --domain D, --since YYYY-MM-DD, --news); each search is billed to your budget (see /self/pricing.yaml).\n';
 
 export function usesRelay(a: Pick<AgentConfig, "search">): boolean {
   return a.search === "relay";

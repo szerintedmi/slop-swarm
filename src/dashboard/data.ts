@@ -22,7 +22,7 @@ export function wakesOf(db: Database, runId: string, agent?: string): WakeRow[] 
 
 /**
  * The agent's last words: the final assistant text of its latest finished wake, read from the tail
- * of the raw CLI log (Claude `result.result`, Codex last `agent_message`). Harness-agnostic, no parser.
+ * of the raw CLI log (Claude `result.result`, Codex last `agent_message`, pi last assistant `message_end`). No parser.
  */
 export function lastSaid(wake: WakeRow | undefined): string | null {
   if (!wake?.raw_log_path) return null;
@@ -40,6 +40,14 @@ export function lastSaid(wake: WakeRow | undefined): string | null {
           const d = JSON.parse(l);
           if (d.type === "result" && typeof d.result === "string" && d.result.trim()) return d.result;
           if (d.type === "item.completed" && d.item?.type === "agent_message" && typeof d.item.text === "string") return d.item.text;
+          if (d.type === "message_end" && d.message?.role === "assistant" && Array.isArray(d.message.content)) {
+            const text = d.message.content
+              .filter((c: any) => c?.type === "text" && typeof c.text === "string")
+              .map((c: any) => c.text)
+              .join("\n")
+              .trim();
+            if (text) return text;
+          }
         } catch {
           /* partial first line */
         }

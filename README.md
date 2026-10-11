@@ -13,7 +13,7 @@ just setup                         # deps, images, proxy, DB, .env (incl. your f
 # .env: SWARM_GITHUB_TOKEN=…        (token of the agents' shared GitHub account; or drop `github:` from the config)
 # .env: OPEN_ROUTER_API_KEY=…        (only for OpenRouter agents, see below)
 just preflight                     # container, auth, egress, isolation, pricing checks
-just smoke                         # 8 min, 1 Claude + 2 Codex agents; dashboard on :7777, forge on :3300
+just smoke                         # 8 min, 1 Claude + 2 Codex + 1 pi agents; dashboard on :7777, forge on :3300
 just up                            # the 1-hour run: 2 Claude + 2 Codex agents
 just status                        # in another terminal; `just report` for the cost summary
 ```

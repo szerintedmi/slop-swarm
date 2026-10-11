@@ -16,7 +16,7 @@ ARG GH_SHA256_AMD64=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b0202930
 ARG TARGETARCH
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git python3 curl ca-certificates jq ripgrep procps xz-utils \
+ && apt-get install -y --no-install-recommends git python3 curl ca-certificates jq ripgrep procps xz-utils poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 
 RUN case "${TARGETARCH}" in arm64) sum="${TEA_SHA256_ARM64}" ;; amd64) sum="${TEA_SHA256_AMD64}" ;; *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; esac \

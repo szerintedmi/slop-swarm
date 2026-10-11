@@ -442,7 +442,7 @@ describe("searches billed to the wake", () => {
     expect(env(wa!, "SLOPSWARM_SEARCH_URL")).toBe(`http://${searchHost(runId)}:8080`);
     expect(env(wa!, "SLOPSWARM_SEARCH_TOKEN_FILE")).toBe("/runtime/search/token");
     expect(env(wa!, "NO_PROXY")!.split(",")).toContain(searchHost(runId));
-    expect(wa![wa!.indexOf("--system-prompt") + 1]).toContain('Web search: `websearch "query"`');
+    expect(wa![wa!.indexOf("--system-prompt") + 1]).toContain('Web search, a shell command (run it with bash): `websearch "query"`');
     expect(env(ba!, "SLOPSWARM_SEARCH_URL")).toBeUndefined();
     expect(ba![ba!.indexOf("--system-prompt") + 1]).not.toContain("websearch");
     // The relay agent has Claude Code's own WebSearch tool turned off; the native one keeps it.

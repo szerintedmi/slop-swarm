@@ -1,10 +1,10 @@
-# Smoke: 1 Claude + 2 Codex agents, just long enough to see agents find each other on the forge (plan §12).
+# Smoke: 1 Claude + 2 Codex + 1 pi (OpenRouter) agents, just long enough to see agents find each other on the forge (plan §12).
 run:
   name: smoke
   max_duration_min: 8
   world_end_grace_s: 60     # a wake still running at the world end is stopped this long after it
 
-agents: [bramble, sorrel, wren]   # -> config/agents/<name>.yaml
+agents: [bramble, sorrel, wren, fern]   # -> config/agents/<name>.yaml
 
 budgets:
   swarm_usd: 10

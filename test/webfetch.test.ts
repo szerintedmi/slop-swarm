@@ -550,7 +550,7 @@ describe("config", () => {
   test("prompt block: short, from the limits", () => {
     const block = webfetchPromptBlock({ maxBytes: 20 * 1048576, timeoutMs: 30_000, maxRedirects: 5 });
     expect(block).toBe(
-      "Web fetch: `webfetch URL` prints a page as text (HTML converted, cut at 40K characters); `webfetch URL -o FILE` saves the raw bytes (any file type).\n" +
+      "Web fetch, a shell command (run it with bash): `webfetch URL` prints a page as text (HTML converted, cut at 40K characters); `webfetch URL -o FILE` saves the raw bytes (any file type).\n" +
         "GET only, public http(s) on ports 80/443; no logins, cookies, forms or JavaScript; max 20 MB, 30 s, 5 redirects. Every fetch is logged.\n",
     );
   });
@@ -635,7 +635,7 @@ describe("wakes", () => {
     expect(r.argvs.get("sorrel")!.join(" ")).toContain('model_instructions_file="/runtime/system-prompt.md"');
     // Only the relay-search agent may search and gets the search line; the others keep their native search.
     expect(Object.fromEntries(Object.entries(mapDuring).map(([k, v]) => [k, v.search]))).toEqual({ bramble: false, sorrel: false, fern: true, wren: true });
-    expect(r.prompt("wren")).toContain('Web search: `websearch "query"`');
+    expect(r.prompt("wren")).toContain('Web search, a shell command (run it with bash): `websearch "query"`');
     expect(r.prompt("fern")).toContain("websearch");
     expect(r.prompt("bramble")).not.toContain("websearch");
     expect(arg(r.argvs.get("bramble")!, "--tools")).toBe("Bash,Read,Write,Edit,WebSearch");

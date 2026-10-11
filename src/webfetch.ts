@@ -16,7 +16,7 @@ const fmt = (n: number) => String(Math.round(n * 10) / 10);
 /** The lines of the system prompt that tell an agent about `webfetch` (only when the world has it). Kept short: every wake pays for it. */
 export function webfetchPromptBlock(w: WebfetchConfig): string {
   return (
-    `Web fetch: \`webfetch URL\` prints a page as text (HTML converted, cut at ${TEXT_MAX_CHARS / 1000}K characters); \`webfetch URL -o FILE\` saves the raw bytes (any file type).\n` +
+    `Web fetch, a shell command (run it with bash): \`webfetch URL\` prints a page as text (HTML converted, cut at ${TEXT_MAX_CHARS / 1000}K characters); \`webfetch URL -o FILE\` saves the raw bytes (any file type).\n` +
     `GET only, public http(s) on ports 80/443; no logins, cookies, forms or JavaScript; max ${fmt(w.maxBytes / 1048576)} MB, ${fmt(w.timeoutMs / 1000)} s, ${w.maxRedirects} redirects. Every fetch is logged.\n`
   );
 }
