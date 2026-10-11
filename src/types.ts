@@ -1,7 +1,9 @@
 // Shared types. The internal event stream is modelled on ACP's `session/update`
 // (tool_call / message / usage / turn_end) so an ACP adapter can slot in later (plan §8).
 
-export type Runtime = "claude" | "codex" | "pi";
+/** The agent CLI (harness) a wake runs: Claude Code, Codex CLI or pi. */
+export const HARNESSES = ["claude", "codex", "pi"] as const;
+export type Harness = (typeof HARNESSES)[number];
 export type Effort = "low" | "medium" | "high";
 
 export type AgentStatus = "active" | "sleeping" | "waking" | "paused" | "depleted" | "failed";
@@ -52,7 +54,7 @@ export type AgentEvent =
   | { kind: "tool_call"; id: string; name: string; args: string }
   | { kind: "tool_result"; id: string; ok: boolean; summary: string }
   | { kind: "usage"; usage: RequestUsage }
-  /** One assistant turn started (pi); the controller counts these for runtimes without a max-turns flag. */
+  /** One assistant turn started (pi); the controller counts these for harnesses without a max-turns flag. */
   | { kind: "turn_start"; n: number }
   | {
       kind: "turn_end";
@@ -102,8 +104,8 @@ export interface FinalizeContext {
   previousWakeStdoutLines?: string[];
 }
 
-export interface RuntimeAdapter {
-  readonly runtime: Runtime;
+export interface HarnessAdapter {
+  readonly harness: Harness;
   /** True when `turn_end.reportedCostUsd` accumulates over a resumed session (Claude's total_cost_usd). */
   readonly reportedCostIsCumulative?: boolean;
   /**
@@ -115,7 +117,7 @@ export interface RuntimeAdapter {
   buildCommand(o: CommandOptions): string[];
   /** Extra container env, e.g. CLAUDE_CONFIG_DIR / CODEX_HOME pointing at the runtime mount. */
   containerEnv(runtimeMount: string): Record<string, string>;
-  /** `model` labels usage for runtimes whose stream doesn't name it (Codex). */
+  /** `model` labels usage for harnesses whose stream doesn't name it (Codex). */
   newParser(o?: { model?: string }): StreamParser;
   /** Authoritative per-request usage after the container exits. */
   finalizeUsage(ctx: FinalizeContext): Promise<RequestUsage[]>;

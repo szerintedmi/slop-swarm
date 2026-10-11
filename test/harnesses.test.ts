@@ -3,8 +3,8 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { computeCost, loadPricing, sumUsage } from "../src/pricing/index.ts";
-import { getAdapter } from "../src/runtimes/index.ts";
-import type { AgentEvent, RequestUsage, RuntimeAdapter } from "../src/types.ts";
+import { getAdapter } from "../src/harnesses/index.ts";
+import type { AgentEvent, RequestUsage, HarnessAdapter } from "../src/types.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 const pricing = loadPricing(join(import.meta.dir, "..", "config", "pricing.yaml"));
@@ -19,7 +19,7 @@ function tmp() {
 }
 
 /** Mimics the controller: feed every line, keep the last usage per requestId in first-seen order. */
-function run(adapter: RuntimeAdapter, stdout: string[], model?: string) {
+function run(adapter: HarnessAdapter, stdout: string[], model?: string) {
   const parser = adapter.newParser({ model });
   const events: AgentEvent[] = [];
   const streamed = new Map<string, RequestUsage>();

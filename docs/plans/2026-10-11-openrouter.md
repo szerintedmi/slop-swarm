@@ -1,4 +1,4 @@
-# OpenRouter models, the pi runtime and a search relay
+# OpenRouter models, the pi harness and a search relay
 
 - **Status:** open
 - **Date:** 2026-10-11
@@ -8,7 +8,7 @@ Let an agent run any OpenRouter model (open models first: GLM, DeepSeek, Kimi, Q
 
 ## Decisions
 
-- **Harness:** a third runtime, `pi` (`@earendil-works/pi-coding-agent`, MIT, npm-pinned). It emits one `message_end` per API request with normalised usage (input excludes cache; cacheRead, cacheWrite, cacheWrite1h, reasoning) and the OpenRouter generation id (`responseId`); it has 4 small tools and a short prompt (low per-wake overhead), and `--session-id` lets the controller pick the session id. Claude Code and Codex stay on their own vendors' models: OpenRouter only guarantees Claude Code with Anthropic, and Codex is Responses-only and tuned to OpenAI tools.
+- **Harness:** a third harness (agent CLI; called "runtime" until the rename), `pi` (`@earendil-works/pi-coding-agent`, MIT, npm-pinned). It emits one `message_end` per API request with normalised usage (input excludes cache; cacheRead, cacheWrite, cacheWrite1h, reasoning) and the OpenRouter generation id (`responseId`); it has 4 small tools and a short prompt (low per-wake overhead), and `--session-id` lets the controller pick the session id. Claude Code and Codex stay on their own vendors' models: OpenRouter only guarantees Claude Code with Anthropic, and Codex is Responses-only and tuned to OpenAI tools.
 - **Routing:** OpenRouter presets only, referenced in the model string: `model: z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash`. The slug before `@` is the model we price; the preset (configured by the owner in OpenRouter, empty system prompt) holds provider routing. No routing settings in our config.
 - **Keys:** plain env vars in `.env`. An agent names the variable (`key_env`, default `OPEN_ROUTER_API_KEY`); the owner may keep one key per model setup for a separate OpenRouter credit limit, but that's only a convention. OpenRouter keys can't be tied to a model or preset. The key reaches the container as `OPENROUTER_API_KEY` via `-e NAME` (never in argv), like the Claude token.
 - **Prices:** fetched, not typed. At run start the controller reads `GET https://openrouter.ai/api/v1/models` (public, no key) for the OpenRouter models the run uses, converts them and merges them into the run's pricing snapshot (`runs.pricing_yaml`), so a run's costs stay reproducible. A model already in `config/pricing.yaml` keeps the hand-written price.
@@ -16,7 +16,7 @@ Let an agent run any OpenRouter model (open models first: GLM, DeepSeek, Kimi, Q
 - **Search:** our own relay, not OpenRouter's web plugin (it searches on every request, pi's own `tools` array would override a preset's server tool, and its fee doesn't appear in pi's usage). Provider: Exa (`costDollars` in every response, per-key spend cap, no card). Kept swappable (Parallel is the runner-up).
 - **Agent-visible prices:** each agent's `/self/pricing.yaml` holds only its own models (done in 537846c).
 
-## 1. pi runtime
+## 1. pi harness
 
 Done (pi 1.1.0).
 
@@ -28,15 +28,15 @@ Done (pi 1.1.0).
    - With `--offline` and `PI_TELEMETRY=0` only `openrouter.ai` is contacted. The wake prompt overhead with the real seed is ~1.1K tokens.
    - Fixtures: `test/fixtures/pi-hi.jsonl`, `pi-resume-wake2.jsonl`, `pi-session.jsonl`, `pi-error.jsonl`.
 2. ✅ `docker/agent.Dockerfile`: pinned pi (node:22 has 22.23), labelled, `PI_OFFLINE`/`PI_TELEMETRY=0` set.
-3. ✅ `src/runtimes/pi.ts`: command, env (`PI_CODING_AGENT_DIR=/runtime/pi`, sessions in `/runtime/sessions`), parser, `finalizeUsage` from the session file.
+3. ✅ `src/harnesses/pi.ts`: command, env (`PI_CODING_AGENT_DIR=/runtime/pi`, sessions in `/runtime/sessions`), parser, `finalizeUsage` from the session file.
 4. ✅ **Max turns:** the parser emits `turn_start`; the controller stops the wake past `max_turns` (adapter `maxTurnsBy: "turns"`; Codex is `"tool_calls"`).
-5. ✅ `Runtime` gains `pi`; `config.ts` accepts it. Fixture tests in `test/runtimes.test.ts`.
+5. ✅ `Harness` gains `pi`; `config.ts` accepts it. Fixture tests in `test/harnesses.test.ts`.
 
 ## 2. OpenRouter wiring
 
 Done.
 
-1. ✅ Agent config: `provider: openrouter` (default `native`), `key_env` (default `OPEN_ROUTER_API_KEY`, must be an env var name). `runtime: pi` ⇔ `provider: openrouter` for now. Run start fails naming the variable if it's unset; the parser fails if `openrouter.ai` isn't on the allowlist. The key goes in as `-e OPENROUTER_API_KEY`, its value only in the `docker run` child's env (`docker.ts` `dockerProcessEnv`).
+1. ✅ Agent config: `provider: openrouter` (default `native`), `key_env` (default `OPEN_ROUTER_API_KEY`, must be an env var name). `harness: pi` ⇔ `provider: openrouter` for now. Run start fails naming the variable if it's unset; the parser fails if `openrouter.ai` isn't on the allowlist. The key goes in as `-e OPENROUTER_API_KEY`, its value only in the `docker run` child's env (`docker.ts` `dockerProcessEnv`).
 2. ✅ Pricing: tiers accept `per_mtok` absolute prices next to multipliers (fields a tier lacks keep the base price). `src/openrouter.ts` maps the catalogue (`min_prompt_tokens` overrides → tier above `min − 1`; time-window overrides not modelled) and inserts the entries as text into the `models:` block of the run's snapshot, other top-level sections untouched. A model in neither the catalogue nor `config/pricing.yaml` fails the run start. The same fetch writes pi's `models.json` per pi agent (needed for presets, §1.1): catalogue metadata, thinking-level map from `supported_efforts`, output capped at 32K.
 3. ✅ Cross-check: `requests.vendor_cost_usd` / `vendor_provider`, filled after the wake from `/api/v1/generation` (404s retried a few times; failures logged as `openrouter_cost` events). The wake's `reported_cost_usd` is their sum when every request resolved, so the existing report line and dashboard stat cover it; the report adds a by-provider table, the dashboard's request chips show the charge.
 4. ✅ `openrouter.ai` on the allowlist in `config/*.yaml`.

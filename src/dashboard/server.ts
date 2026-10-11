@@ -4,7 +4,7 @@ import type { Server as KitServer, SSRManifest } from '@sveltejs/kit';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import type { Runtime, StreamParser } from '../types.ts';
+import type { Harness, StreamParser } from '../types.ts';
 import { buildDashboard } from './build.ts';
 import { createDashboardService } from './service.ts';
 export { fileTree, overviewState } from './data.ts';
@@ -15,7 +15,7 @@ export interface DashboardOptions {
   readonly?: boolean;
   runId?: string;
   forge?: { runId: string; url: string };
-  parserFor?: (runtime: Runtime) => StreamParser | Promise<StreamParser>;
+  parserFor?: (harness: Harness) => StreamParser | Promise<StreamParser>;
 }
 
 interface Kit { kit: KitServer; assets: Map<string, string> }

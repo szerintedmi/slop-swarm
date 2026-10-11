@@ -32,7 +32,7 @@ function config(over: { perWakeMaxUsd?: number; worldEndGraceS?: number } = {}):
       controller: { tick_s: 1 },
       network: { name: "slopswarm-internal", proxy: "http://slopswarm-proxy:8888", allowlist: ["api.anthropic.com"] },
     },
-    (name) => ({ name, runtime: "claude", model: "claude-haiku-5-5", effort: "medium" }),
+    (name) => ({ name, harness: "claude", model: "claude-haiku-5-5", effort: "medium" }),
   );
   return { ...parsed, paths: base.paths, snapshot: "# --- test\n" };
 }
@@ -526,7 +526,7 @@ describe("controller", () => {
         scheduler: { max_sleep_min: 15 },
         network: { name: "slopswarm-internal", proxy: "http://slopswarm-proxy:8888", allowlist: ["openrouter.ai"] },
       },
-      (name) => ({ name, runtime: "pi", provider: "openrouter", model: "z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash", key_env: "TEST_OR_KEY", effort: "low" }),
+      (name) => ({ name, harness: "pi", provider: "openrouter", model: "z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash", key_env: "TEST_OR_KEY", effort: "low" }),
     );
     const cfg = { ...parsed, paths: base.paths, snapshot: "# --- test\n" };
     const pricingYaml = readFileSync(base.paths.pricing, "utf8").replace(

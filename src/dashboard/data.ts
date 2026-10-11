@@ -22,7 +22,7 @@ export function wakesOf(db: Database, runId: string, agent?: string): WakeRow[] 
 
 /**
  * The agent's last words: the final assistant text of its latest finished wake, read from the tail
- * of the raw CLI log (Claude `result.result`, Codex last `agent_message`). Runtime-agnostic, no parser.
+ * of the raw CLI log (Claude `result.result`, Codex last `agent_message`). Harness-agnostic, no parser.
  */
 export function lastSaid(wake: WakeRow | undefined): string | null {
   if (!wake?.raw_log_path) return null;
@@ -95,7 +95,7 @@ export function overviewState(db: Database, run: RunRow, now = Date.now()) {
     },
     agents: agents.map((a) => ({
       name: a.name,
-      runtime: a.runtime,
+      harness: a.harness,
       model: a.model,
       effort: a.effort,
       status: a.status,

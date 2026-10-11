@@ -19,7 +19,7 @@ describe("config", () => {
       expect(c.network.allowlist).toContain("api.anthropic.com");
     }
     const smoke = loadSwarm("config/smoke.yaml");
-    expect(smoke.agents.map((a) => a.runtime)).toEqual(["claude", "codex", "codex"]);
+    expect(smoke.agents.map((a) => a.harness)).toEqual(["claude", "codex", "codex"]);
     expect(smoke.scheduler.maxConcurrentWakes).toBe(3); // defaults to the number of agents
     expect(smoke.budgets.swarmUsd).toBeGreaterThanOrEqual(smoke.agents.length * smoke.budgets.perAgentUsd);
   });
@@ -39,10 +39,13 @@ describe("config", () => {
     scheduler: { max_sleep_min: 15 },
     network: { name: "n", proxy: "http://p:8888", allowlist: ["api.anthropic.com"] },
   });
-  const agent = (o: object = {}) => ({ name: "a1", runtime: "claude", model: "claude-haiku-5-5", ...o });
+  const agent = (o: object = {}) => ({ name: "a1", harness: "claude", model: "claude-haiku-5-5", ...o });
 
   test("validation errors", () => {
-    expect(() => parseSwarm(base(), () => agent({ runtime: "gemini" }))).toThrow(/runtime/);
+    expect(() => parseSwarm(base(), () => agent({ harness: "gemini" }))).toThrow(/harness/);
+    // `runtime:` (the old name) still loads, for config snapshots of earlier runs; both at once is an error.
+    expect(parseSwarm(base(), () => ({ name: "a1", runtime: "codex", model: "m" })).agents[0]!.harness).toBe("codex");
+    expect(() => parseSwarm(base(), () => agent({ runtime: "claude" }))).toThrow(/harness only/);
     expect(() => parseSwarm(base(), () => agent({ name: "Bad Name" }))).toThrow(/name/);
     expect(() => parseSwarm({ ...base(), agents: ["a--b"] }, () => agent({ name: "a--b" }))).toThrow(/--/);
     expect(() => parseSwarm({ ...base(), agents: ["ab-"] }, () => agent({ name: "ab-" }))).toThrow(/name/);

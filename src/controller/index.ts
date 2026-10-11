@@ -10,7 +10,7 @@ import type { ForgeApi } from "../forge.ts";
 import { GITHUB_TOKEN_PATH } from "../github.ts";
 import { AGENT_IMAGE } from "../proxy.ts";
 import { parsePricing, type PricingTable } from "../pricing/index.ts";
-import { getAdapter } from "../runtimes/index.ts";
+import { getAdapter } from "../harnesses/index.ts";
 import { readSearchLog, revokeSearchToken, runSearchDirs, searchRows } from "../search.ts";
 import type { RequestUsage } from "../types.ts";
 import { describeExtension, extraSwarmUsd, parseExtendDetail } from "../world.ts";
@@ -109,7 +109,7 @@ export class Controller {
     if (!this.opts.wakeDeps?.killContainer) await dockerKillLabelled({ runId: this.run.id });
     for (const w of open) {
       const a = this.repo.agent(w.agent);
-      const adapter = getAdapter(a.runtime);
+      const adapter = getAdapter(a.harness);
       let usage: RequestUsage[] = [];
       let sessionId = w.session_id ?? undefined;
       try {

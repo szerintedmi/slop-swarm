@@ -1,5 +1,5 @@
 name: sorrel
-runtime: codex             # claude | codex | pi
+harness: codex             # claude | codex | pi
 model: gpt-6-luna
 effort: medium
 # budget_usd: 3            # optional override of budgets.per_agent_usd

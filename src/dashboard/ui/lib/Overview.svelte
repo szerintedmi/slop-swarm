@@ -14,7 +14,7 @@
 </div>
 <h2>Agents</h2><div class="grid">
 {#each model.state.agents as a (a.name)}<div class="card"><div class="head"><Chip name={a.name} runId={r.id} /><Badge status={a.status} /></div>
-<div class="muted small">{a.runtime} · {a.model} · {a.effort}</div>
+<div class="muted small">{a.harness} · {a.model} · {a.effort}</div>
 {#if a.lastSaid}<div class="small muted">last said</div><Clip text={a.lastSaid} markdown lines={3} id="said-{r.id}-{a.name}" />{:else}<p class="muted small">Has not said anything yet.</p>{/if}
 <dl class="kv"><dt>next wake</dt><dd>{#if a.nextWakeAt != null}{rel(a.nextWakeAt)} <span class="muted">({triggerText(a.nextTrigger ?? '')})</span>{:else}—{/if}</dd><dt>wakes</dt><dd>{int(a.wakeCount)}</dd><dt>woken by forge</dt><dd>{int(a.notificationWakes)}</dd><dt>spend</dt><dd>{usd(a.spentUsd)} of {usd(a.budgetUsd, 2)}</dd></dl>
 <Bar value={a.spentUsd} max={a.budgetUsd} /><Controls runId={r.id} agent={a.name} readonly={model.readonly} live={model.live} />

@@ -1,6 +1,6 @@
 // Claude Code adapter: `claude -p --output-format stream-json --verbose` (plan §3, §8).
 import { join } from "node:path";
-import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, RuntimeAdapter, StreamParser } from "../types.ts";
+import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, HarnessAdapter, StreamParser } from "../types.ts";
 import { findFiles, n, parseJsonLine, readJsonLines, short } from "./util.ts";
 
 /** Claude `input_tokens` EXCLUDES cache tokens; cache writes are split by TTL. */
@@ -89,8 +89,8 @@ class ClaudeParser implements StreamParser {
 /** Tools for the lean harness. WebFetch is left out: it fetches client-side and the proxy blocks it. */
 export const LEAN_TOOLS = "Bash,Read,Write,Edit,WebSearch";
 
-export const claudeAdapter: RuntimeAdapter = {
-  runtime: "claude",
+export const claudeAdapter: HarnessAdapter = {
+  harness: "claude",
   reportedCostIsCumulative: true,
 
   buildCommand(o: CommandOptions): string[] {

@@ -242,9 +242,9 @@ describe("search cost", () => {
 
 describe("config and setup", () => {
   test("search: native by default for claude/codex, relay on request", () => {
-    expect(parseAgent({ name: "a", runtime: "claude", model: "m" }, 1, "x").search).toBe("native");
-    expect(parseAgent({ name: "a", runtime: "codex", model: "m", search: "relay" }, 1, "x").search).toBe("relay");
-    expect(() => parseAgent({ name: "a", runtime: "codex", model: "m", search: "exa" }, 1, "x")).toThrow("search");
+    expect(parseAgent({ name: "a", harness: "claude", model: "m" }, 1, "x").search).toBe("native");
+    expect(parseAgent({ name: "a", harness: "codex", model: "m", search: "relay" }, 1, "x").search).toBe("relay");
+    expect(() => parseAgent({ name: "a", harness: "codex", model: "m", search: "exa" }, 1, "x")).toThrow("search");
   });
 
   test("start checks: pricing needed, missing key only warns", () => {
@@ -359,7 +359,7 @@ function config(): SwarmConfig {
       controller: { tick_s: 1 },
       network: { name: "slopswarm-internal", proxy: "http://slopswarm-proxy:8888", allowlist: ["api.anthropic.com"] },
     },
-    (name) => ({ name, runtime: "claude", model: "claude-haiku-5-5", effort: "medium", ...(name === "wren" ? { search: "relay" } : {}) }),
+    (name) => ({ name, harness: "claude", model: "claude-haiku-5-5", effort: "medium", ...(name === "wren" ? { search: "relay" } : {}) }),
   );
   return { ...parsed, paths: base.paths, snapshot: "# --- test\n" };
 }

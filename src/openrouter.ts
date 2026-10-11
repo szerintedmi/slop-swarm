@@ -185,7 +185,7 @@ export async function prepareOpenRouter(agents: AgentConfig[], baseYaml: string,
   const catalogue = await fetchCatalogue(fetchFn);
   const pricingYaml = mergePricing(baseYaml, or.map((a) => a.model), catalogue, now);
   const piModels: Record<string, unknown> = {};
-  for (const a of or.filter((x) => x.runtime === "pi")) {
+  for (const a of or.filter((x) => x.harness === "pi")) {
     const m = catalogueEntry(catalogue, a.model);
     if (!m) throw new PricingError(`${a.name}: ${priceKey(a.model)} is not in the OpenRouter catalogue`);
     piModels[a.name] = piModelsJson([piModelEntry(a.model, m)]);

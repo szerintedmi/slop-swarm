@@ -10,9 +10,9 @@ import { forgeEnv, forgeHost, forgeUrl, type ForgeApi } from "../forge.ts";
 import { githubEnv, writeGithubLogin } from "../github.ts";
 import { generationCosts, type VendorCost } from "../openrouter.ts";
 import { computeCost, type PricingTable } from "../pricing/index.ts";
-import { getAdapter } from "../runtimes/index.ts";
+import { getAdapter } from "../harnesses/index.ts";
 import { issueSearchToken, readSearchLog, revokeSearchToken, runSearchDirs, SEARCH_MODEL, SEARCH_PROMPT_LINE, searchEnv, searchHost, searchRows, usesRelay } from "../search.ts";
-import type { AgentEvent, CostBreakdown, RequestUsage, Runtime, RuntimeAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
+import type { AgentEvent, CostBreakdown, RequestUsage, Harness, HarnessAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
 import { isDepleted, overLimit, wakeLimit, agentRemaining } from "./budget.ts";
 import type { Repo } from "./repo.ts";
 import { fillSeed, wakeNote, SYSTEM_PROMPT_FILE } from "./run.ts";
@@ -52,7 +52,7 @@ export interface WakeDeps {
   startProcess?: (argv: string[], stderrPath: string, env: Record<string, string | undefined>) => ProcessHandle;
   /** Kill the wake's container; injectable for tests. */
   killContainer?: (name: string) => Promise<void>;
-  adapterFor?: (runtime: Runtime) => RuntimeAdapter;
+  adapterFor?: (harness: Harness) => HarnessAdapter;
   /** OpenRouter's charged cost per generation id (cross-check); injectable for tests. */
   vendorCosts?: (ids: string[], key: string) => Promise<Map<string, VendorCost>>;
   now?: () => number;
@@ -130,17 +130,17 @@ export function previousSessionLines(previous: WakeRow[], sessionId: string | un
 }
 
 /** The vendor-reported cost of the previous wake, as its stream said it (cumulative for Claude). */
-function reportedCostOf(adapter: RuntimeAdapter, model: string, lines: string[]): number | undefined {
+function reportedCostOf(adapter: HarnessAdapter, model: string, lines: string[]): number | undefined {
   const parser = adapter.newParser({ model });
   let reported: number | undefined;
   for (const l of lines) for (const e of parser.push(l)) if (e.kind === "turn_end" && e.reportedCostUsd !== undefined) reported = e.reportedCostUsd;
   return reported;
 }
 
-/** Secrets a runtime's container gets by name (never in argv): the Claude token, or the agent's OpenRouter key. */
-export function secretEnv(agent: Pick<AgentConfig, "runtime" | "provider" | "keyEnv">): NonNullable<ContainerSpec["passEnv"]> {
+/** Secrets a harness's container gets by name (never in argv): the Claude token, or the agent's OpenRouter key. */
+export function secretEnv(agent: Pick<AgentConfig, "harness" | "provider" | "keyEnv">): NonNullable<ContainerSpec["passEnv"]> {
   if (agent.provider === "openrouter" && agent.keyEnv) return [{ name: "OPENROUTER_API_KEY", from: agent.keyEnv }];
-  return agent.runtime === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
+  return agent.harness === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
 }
 
 /**
@@ -159,7 +159,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
   const startProcess = deps.startProcess ?? defaultStart;
   const killContainer = deps.killContainer ?? defaultKill;
   const a = repo.agent(agentName);
-  const adapter = (deps.adapterFor ?? getAdapter)(a.runtime);
+  const adapter = (deps.adapterFor ?? getAdapter)(a.harness);
   const agentCfg = cfg.agents.find((x) => x.name === a.name);
   const dirs = agentDirs(repo.runId, a.name);
   const seq = a.wake_count + 1;
@@ -247,7 +247,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     // The agent sees only its own models' prices; costing above keeps the full table.
     writeSelf(dirs.self, a.budget_usd, previous, deps.pricingYaml, [...repo.agentModels(a.name), ...(relay ? [SEARCH_MODEL] : [])]);
 
-    if (a.runtime === "codex" && !existsSync(join(dirs.runtime, "auth.json"))) {
+    if (a.harness === "codex" && !existsSync(join(dirs.runtime, "auth.json"))) {
       if (!existsSync(deps.codexAuthPath)) throw new Error(`codex auth missing: ${deps.codexAuthPath}`);
       copyFileSync(deps.codexAuthPath, join(dirs.runtime, "auth.json"));
       chmodSync(join(dirs.runtime, "auth.json"), 0o600);
@@ -294,7 +294,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       agent: a.name,
       mounts: { home: dirs.home, self: dirs.self, runtime: dirs.runtime },
       env: { ...adapter.containerEnv(MOUNTS.runtime), ...forgeEnv(repo.runId), ...(cfg.github ? githubEnv() : {}), ...(relay ? searchEnv(repo.runId) : {}) },
-      passEnv: secretEnv(agentCfg ?? { runtime: a.runtime, provider: "native" }),
+      passEnv: secretEnv(agentCfg ?? { harness: a.harness, provider: "native" }),
       argv,
       network: cfg.network.name,
       proxy: cfg.network.proxy,

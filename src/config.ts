@@ -1,22 +1,22 @@
 // YAML config loading + validation (plan §2, §5, §6).
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { Effort, Runtime } from "./types.ts";
+import { HARNESSES, type Effort, type Harness } from "./types.ts";
 
 export type ModelProvider = "native" | "openrouter";
 
 export interface AgentConfig {
   name: string;
-  runtime: Runtime;
+  harness: Harness;
   /** For OpenRouter, the model string as sent, e.g. `z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash`. */
   model: string;
   effort: Effort;
   budgetUsd: number;
-  /** `native`: the runtime's own vendor (Claude Code, Codex). `openrouter`: OpenRouter, via pi. */
+  /** `native`: the harness's own vendor (Claude Code, Codex). `openrouter`: OpenRouter, via pi. */
   provider: ModelProvider;
   /** OpenRouter agents: the env var (in .env) holding the API key. Never the key itself. */
   keyEnv?: string;
-  /** Web search: the runtime's own tool (`native`) or the run's relay via `websearch` (src/search.ts). */
+  /** Web search: the harness's own tool (`native`) or the run's relay via `websearch` (src/search.ts). */
   search: "native" | "relay";
 }
 
@@ -93,24 +93,26 @@ export function parseAgent(raw: unknown, defaultBudget: number, source: string):
   if (!AGENT_NAME_RE.test(name)) throw new ConfigError(`${source}.name: must match ${AGENT_NAME_RE}`);
   // Forgejo rejects consecutive non-alphanumerics in usernames.
   if (name.includes("--")) throw new ConfigError(`${source}.name: must not contain "--"`);
-  const runtime = oneOf(a.runtime, `${source}.runtime`, ["claude", "codex", "pi"] as const);
+  // `runtime:` is the old name of `harness:`, accepted only so config snapshots of earlier runs still load.
+  if (a.harness !== undefined && a.runtime !== undefined) throw new ConfigError(`${source}: give harness only (runtime is its old name)`);
+  const harness = oneOf(a.harness ?? a.runtime, `${source}.harness`, HARNESSES);
   const provider = oneOf(a.provider ?? "native", `${source}.provider`, ["native", "openrouter"] as const);
   // Claude Code and Codex stay on their own vendors; pi runs OpenRouter models only (for now).
-  if ((runtime === "pi") !== (provider === "openrouter"))
-    throw new ConfigError(`${source}: runtime pi goes with provider: openrouter (and only pi does, for now)`);
+  if ((harness === "pi") !== (provider === "openrouter"))
+    throw new ConfigError(`${source}: harness pi goes with provider: openrouter (and only pi does, for now)`);
   if (a.key_env !== undefined && provider !== "openrouter") throw new ConfigError(`${source}.key_env: only for provider: openrouter`);
   const keyEnv = provider === "openrouter" ? str(a.key_env ?? DEFAULT_OPENROUTER_KEY_ENV, `${source}.key_env`) : undefined;
   if (keyEnv !== undefined && !ENV_NAME_RE.test(keyEnv)) throw new ConfigError(`${source}.key_env: not an environment variable name`);
   return {
     name,
-    runtime,
+    harness,
     model: str(a.model, `${source}.model`),
     effort: oneOf(a.effort ?? "medium", `${source}.effort`, ["low", "medium", "high"] as const),
     budgetUsd: a.budget_usd === undefined ? defaultBudget : num(a.budget_usd, `${source}.budget_usd`),
     provider,
     ...(keyEnv !== undefined ? { keyEnv } : {}),
     // Claude and Codex keep their vendors' native search; pi has none and uses the relay.
-    search: oneOf(a.search ?? (runtime === "pi" ? "relay" : "native"), `${source}.search`, ["native", "relay"] as const),
+    search: oneOf(a.search ?? (harness === "pi" ? "relay" : "native"), `${source}.search`, ["native", "relay"] as const),
   };
 }
 

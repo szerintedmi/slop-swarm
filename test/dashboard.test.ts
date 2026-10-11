@@ -37,7 +37,7 @@ function seed(db: Database, rawLog: string) {
     ["thistle", "waking"],
   ] as const)
     db.query(
-      `INSERT INTO agents (run_id, name, runtime, model, effort, budget_usd, spent_usd, status, next_wake_at, next_trigger, wake_count)
+      `INSERT INTO agents (run_id, name, harness, model, effort, budget_usd, spent_usd, status, next_wake_at, next_trigger, wake_count)
        VALUES (?, ?, 'claude', 'claude-haiku-5-5', 'medium', 3, 0.42, ?, ?, 'self', 2)`,
     ).run(RUN, name, status, now + 600_000);
   for (const seq of [1, 2])

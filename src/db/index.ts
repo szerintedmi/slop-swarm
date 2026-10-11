@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import type { Runtime } from "../types.ts";
+import type { Harness } from "../types.ts";
 import schemaSql from "./schema.sql" with { type: "text" };
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -33,9 +33,10 @@ export function openDb(path = DB_PATH, { readonly = false } = {}): Database {
   return db;
 }
 
-/** Columns added after a table was first created (CREATE TABLE IF NOT EXISTS doesn't add them). */
+/** Columns added or renamed after a table was first created (CREATE TABLE IF NOT EXISTS doesn't change it). */
 function migrate(db: Database): void {
   const has = (table: string, col: string) => db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
+  if (has("agents", "runtime")) db.exec("ALTER TABLE agents RENAME COLUMN runtime TO harness");
   if (!has("controls", "detail")) db.exec("ALTER TABLE controls ADD COLUMN detail TEXT");
   if (!has("requests", "vendor_cost_usd")) db.exec("ALTER TABLE requests ADD COLUMN vendor_cost_usd REAL");
   if (!has("requests", "vendor_provider")) db.exec("ALTER TABLE requests ADD COLUMN vendor_provider TEXT");
@@ -60,7 +61,7 @@ export interface RunRow {
 export interface AgentRow {
   run_id: string;
   name: string;
-  runtime: Runtime;
+  harness: Harness;
   model: string;
   effort: string;
   budget_usd: number;

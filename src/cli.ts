@@ -18,8 +18,8 @@ import { runPreflight } from "./preflight.ts";
 import { parsePricing } from "./pricing/index.ts";
 import { checkSearchSetup, ensureSearchImage, searchHost, startSearch, stopSearch, usesRelay } from "./search.ts";
 import { renderReport } from "./report.ts";
-import { getAdapter } from "./runtimes/index.ts";
-import { writePiModels } from "./runtimes/pi.ts";
+import { getAdapter } from "./harnesses/index.ts";
+import { writePiModels } from "./harnesses/pi.ts";
 import { describeExtension, parseExtendArgs, parseExtendDetail, swarmBudgetUsd, worldTime } from "./world.ts";
 
 const ROOT = join(import.meta.dir, "..");
@@ -82,10 +82,10 @@ function takeLock(): void {
   process.on("exit", releaseLock);
 }
 
-/** Fail before a run starts (or resumes) if a configured runtime has no credentials. */
+/** Fail before a run starts (or resumes) if a configured harness has no credentials. */
 function assertSecrets(cfg: ReturnType<typeof loadSwarm>): void {
-  if (cfg.agents.some((a) => a.runtime === "claude") && !process.env.CLAUDE_CODE_OAUTH_TOKEN) die("CLAUDE_CODE_OAUTH_TOKEN is not set in .env");
-  if (cfg.agents.some((a) => a.runtime === "codex") && !existsSync(CODEX_AUTH_PATH)) die(`codex agents need ${CODEX_AUTH_PATH} (copy ~/.codex/auth.json)`);
+  if (cfg.agents.some((a) => a.harness === "claude") && !process.env.CLAUDE_CODE_OAUTH_TOKEN) die("CLAUDE_CODE_OAUTH_TOKEN is not set in .env");
+  if (cfg.agents.some((a) => a.harness === "codex") && !existsSync(CODEX_AUTH_PATH)) die(`codex agents need ${CODEX_AUTH_PATH} (copy ~/.codex/auth.json)`);
   for (const a of cfg.agents) if (a.keyEnv && !process.env[a.keyEnv]?.trim()) die(`${a.name}: ${a.keyEnv} is not set in .env (its OpenRouter key)`);
   if (!forgeAdminFromEnv()) die("FORGE_ADMIN_PASSWORD is not set in .env (`just setup` generates one)");
   if (cfg.github && !existsSync(GITHUB_TOKEN_PATH)) die(`the github outlet needs ${GITHUB_TOKEN_PATH} (a token for ${cfg.github.user}; or remove github: from the config)`);
@@ -355,10 +355,10 @@ const commands: Record<string, (args: string[]) => Promise<void> | void> = {
         /* the controller logs a malformed one */
       }
     }
-    const rows = [["agent", "runtime", "model", "status", "next wake", "wakes", "spent", "budget", "last exit"]];
+    const rows = [["agent", "harness", "model", "status", "next wake", "wakes", "spent", "budget", "last exit"]];
     for (const a of agents) {
       const w = last.get(run.id, a.name);
-      rows.push([a.name, a.runtime, a.model, a.status, live && a.next_wake_at ? `${rel(a.next_wake_at, now)} (${a.next_trigger})` : "-", String(a.wake_count), `$${a.spent_usd.toFixed(4)}`, `$${a.budget_usd.toFixed(2)}`, w ? `${w.exit_reason ?? "running"} ${rel(w.ended_at ?? w.started_at, now)}` : "-"]);
+      rows.push([a.name, a.harness, a.model, a.status, live && a.next_wake_at ? `${rel(a.next_wake_at, now)} (${a.next_trigger})` : "-", String(a.wake_count), `$${a.spent_usd.toFixed(4)}`, `$${a.budget_usd.toFixed(2)}`, w ? `${w.exit_reason ?? "running"} ${rel(w.ended_at ?? w.started_at, now)}` : "-"]);
     }
     console.log(table(rows));
   },
@@ -379,7 +379,7 @@ const commands: Record<string, (args: string[]) => Promise<void> | void> = {
       db.query<{ request_id: string; cost_usd: number }, [number]>("SELECT request_id, cost_usd FROM requests WHERE wake_id = ?").all(wake.id).map((r) => [r.request_id, r.cost_usd]),
     );
     console.log(`# ${name} wake ${wake.seq} (${wake.trigger}${wake.resumed ? ", resumed" : ""}) ${new Date(wake.started_at).toISOString()} -> ${wake.exit_reason ?? "running"}, $${wake.cost_usd.toFixed(4)}\n`);
-    const parser = getAdapter(agent.runtime).newParser({ model: agent.model });
+    const parser = getAdapter(agent.harness).newParser({ model: agent.model });
     const seen = new Set<string>();
     const indent = (s: string, pad: string) => s.replace(/\n/g, `\n${pad}`);
     // Tool output can be huge; keep the first lines unless --full.

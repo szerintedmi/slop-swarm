@@ -1,6 +1,6 @@
 // Codex CLI adapter: `codex exec --json` for the live stream, the rollout file for per-request usage (plan §4.2, §8).
 import { basename, join } from "node:path";
-import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, RuntimeAdapter, StreamParser } from "../types.ts";
+import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, HarnessAdapter, StreamParser } from "../types.ts";
 import { findFiles, n, parseJsonLine, readJsonLines, short } from "./util.ts";
 
 /**
@@ -200,8 +200,8 @@ export function leanFlags(instructionsFile: string): string[] {
   ];
 }
 
-export const codexAdapter: RuntimeAdapter = {
-  runtime: "codex",
+export const codexAdapter: HarnessAdapter = {
+  harness: "codex",
   maxTurnsBy: "tool_calls",
 
   // Codex has no max-turns flag: CommandOptions.maxTurns is ignored, the controller enforces timeout + budget.

@@ -6,7 +6,7 @@
   const base = $derived(`/agent/${encodeURIComponent(a.name)}?run=${encodeURIComponent(model.run.id)}`);
   const done = $derived(model.wakes.filter(w => w.ended_at != null));
 </script>
-<div class="row" style="justify-content:space-between"><div><h1 style="font-size:22px"><Chip name={a.name} runId={model.run.id} link={false} /> <Badge status={a.status} /></h1><p class="sub small">{a.runtime} · {a.model} · {a.effort} effort</p></div><Controls runId={model.run.id} agent={a.name} readonly={model.readonly} live={model.live} /></div>
+<div class="row" style="justify-content:space-between"><div><h1 style="font-size:22px"><Chip name={a.name} runId={model.run.id} link={false} /> <Badge status={a.status} /></h1><p class="sub small">{a.harness} · {a.model} · {a.effort} effort</p></div><Controls runId={model.run.id} agent={a.name} readonly={model.readonly} live={model.live} /></div>
 <nav class="tabs" style="margin-bottom:10px">{#each ['summary', 'wakes', 'memory'] as tab}<a href="{base}&tab={tab}" class:on={tab === model.tab}>{tab}{tab === 'wakes' ? ` · ${model.wakes.length}` : tab === 'memory' ? ` · ${model.fileCount}` : ''}</a>{/each}</nav>
 {#if model.tab === 'summary'}
 <div class="stats"><Stat value={usd(a.spent_usd)} label="spent of {usd(a.budget_usd, 2)}" /><Stat value={int(a.wake_count)} label="wakes" /><Stat value={done.length ? usd(done.reduce((n, w) => n + w.cost_usd, 0) / done.length) : '—'} label="avg per wake" /><Stat value={int(model.wakes.filter(w => w.trigger === 'message').length)} label="woken by forge" /><Stat value={model.live && a.next_wake_at ? rel(a.next_wake_at) : '—'} label="next wake" /></div><Bar value={a.spent_usd} max={a.budget_usd} />

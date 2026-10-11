@@ -113,8 +113,8 @@ describe("pi models.json", () => {
       expect(url).toBe("https://openrouter.ai/api/v1/models");
       return new Response(JSON.stringify({ data: CATALOGUE }));
     };
-    const fern = parseAgent({ name: "fern", runtime: "pi", provider: "openrouter", model: PRESET }, 1, "fern");
-    const bramble = parseAgent({ name: "bramble", runtime: "claude", model: "claude-haiku-5-5" }, 1, "bramble");
+    const fern = parseAgent({ name: "fern", harness: "pi", provider: "openrouter", model: PRESET }, 1, "fern");
+    const bramble = parseAgent({ name: "bramble", harness: "claude", model: "claude-haiku-5-5" }, 1, "bramble");
     const s = await prepareOpenRouter([fern, bramble], BASE, fetchFn as typeof fetch);
     expect(fetches).toBe(1);
     expect(parsePricing(s.pricingYaml).models["z-ai/glm-5.3-flash"]).toBeDefined();
@@ -146,14 +146,14 @@ describe("generation cost lookup", () => {
 
 describe("agent config", () => {
   test("provider defaults to native; pi needs openrouter and vice versa; key_env defaults and is validated", () => {
-    expect(parseAgent({ name: "bramble", runtime: "claude", model: "m" }, 1, "a")).toMatchObject({ provider: "native" });
-    expect(parseAgent({ name: "bramble", runtime: "claude", model: "m" }, 1, "a").keyEnv).toBeUndefined();
-    expect(parseAgent({ name: "fern", runtime: "pi", provider: "openrouter", model: PRESET }, 1, "a")).toMatchObject({ keyEnv: "OPEN_ROUTER_API_KEY" });
-    expect(parseAgent({ name: "fern", runtime: "pi", provider: "openrouter", model: PRESET, key_env: "OR_KEY_GLM" }, 1, "a").keyEnv).toBe("OR_KEY_GLM");
-    expect(() => parseAgent({ name: "fern", runtime: "pi", model: PRESET }, 1, "a")).toThrow(/provider: openrouter/);
-    expect(() => parseAgent({ name: "fern", runtime: "codex", provider: "openrouter", model: "m" }, 1, "a")).toThrow(/provider: openrouter/);
-    expect(() => parseAgent({ name: "fern", runtime: "pi", provider: "openrouter", model: PRESET, key_env: "sk-or-v1-abc" }, 1, "a")).toThrow(/key_env/);
-    expect(() => parseAgent({ name: "bramble", runtime: "claude", model: "m", key_env: "X" }, 1, "a")).toThrow(/key_env/);
+    expect(parseAgent({ name: "bramble", harness: "claude", model: "m" }, 1, "a")).toMatchObject({ provider: "native" });
+    expect(parseAgent({ name: "bramble", harness: "claude", model: "m" }, 1, "a").keyEnv).toBeUndefined();
+    expect(parseAgent({ name: "fern", harness: "pi", provider: "openrouter", model: PRESET }, 1, "a")).toMatchObject({ keyEnv: "OPEN_ROUTER_API_KEY" });
+    expect(parseAgent({ name: "fern", harness: "pi", provider: "openrouter", model: PRESET, key_env: "OR_KEY_GLM" }, 1, "a").keyEnv).toBe("OR_KEY_GLM");
+    expect(() => parseAgent({ name: "fern", harness: "pi", model: PRESET }, 1, "a")).toThrow(/provider: openrouter/);
+    expect(() => parseAgent({ name: "fern", harness: "codex", provider: "openrouter", model: "m" }, 1, "a")).toThrow(/provider: openrouter/);
+    expect(() => parseAgent({ name: "fern", harness: "pi", provider: "openrouter", model: PRESET, key_env: "sk-or-v1-abc" }, 1, "a")).toThrow(/key_env/);
+    expect(() => parseAgent({ name: "bramble", harness: "claude", model: "m", key_env: "X" }, 1, "a")).toThrow(/key_env/);
   });
 
   test("a run with OpenRouter agents needs openrouter.ai on the allowlist", () => {
@@ -164,18 +164,18 @@ describe("agent config", () => {
       scheduler: { max_sleep_min: 15 },
       network: { name: "n", proxy: "http://p:8888", allowlist },
     });
-    const fern = (name: string) => ({ name, runtime: "pi", provider: "openrouter", model: PRESET });
+    const fern = (name: string) => ({ name, harness: "pi", provider: "openrouter", model: PRESET });
     expect(() => parseSwarm(swarm(["api.anthropic.com"]), fern)).toThrow(/openrouter\.ai/);
     expect(parseSwarm(swarm(["openrouter.ai"]), fern).agents[0]!.provider).toBe("openrouter");
   });
 
   test("the sample agent parses", () => {
     const fern = parseAgent(Bun.YAML.parse(readFileSync("config/agents/fern.yaml", "utf8")), 1, "fern");
-    expect(fern).toMatchObject({ runtime: "pi", provider: "openrouter", model: PRESET, keyEnv: "OPEN_ROUTER_API_KEY" });
+    expect(fern).toMatchObject({ harness: "pi", provider: "openrouter", model: PRESET, keyEnv: "OPEN_ROUTER_API_KEY" });
   });
 
   test("the key reaches the container by name only, renamed to OPENROUTER_API_KEY", () => {
-    const fern = parseAgent({ name: "fern", runtime: "pi", provider: "openrouter", model: PRESET, key_env: "OR_KEY_GLM" }, 1, "a");
+    const fern = parseAgent({ name: "fern", harness: "pi", provider: "openrouter", model: PRESET, key_env: "OR_KEY_GLM" }, 1, "a");
     const passEnv = secretEnv(fern);
     expect(passEnv).toEqual([{ name: "OPENROUTER_API_KEY", from: "OR_KEY_GLM" }]);
     const args = dockerRunArgs({
@@ -186,6 +186,6 @@ describe("agent config", () => {
     expect(args.some((a) => a.includes("secret-value"))).toBe(false);
     const env = dockerProcessEnv({ passEnv }, { OR_KEY_GLM: "secret-value", PATH: "/bin" });
     expect(env).toEqual({ OR_KEY_GLM: "secret-value", PATH: "/bin", OPENROUTER_API_KEY: "secret-value" });
-    expect(secretEnv(parseAgent({ name: "bramble", runtime: "claude", model: "m" }, 1, "a"))).toEqual(["CLAUDE_CODE_OAUTH_TOKEN"]);
+    expect(secretEnv(parseAgent({ name: "bramble", harness: "claude", model: "m" }, 1, "a"))).toEqual(["CLAUDE_CODE_OAUTH_TOKEN"]);
   });
 });

@@ -1,6 +1,6 @@
 // Host-side data service. Database/file handles never enter SvelteKit load results.
 import { agentDirs, enqueueControl, getRun, type AgentRow, type ControlAction, type EventRow, type RequestRow, type RunRow, type WakeRow } from '../db/index.ts';
-import type { AgentEvent, Runtime, StreamParser } from '../types.ts';
+import type { AgentEvent, Harness, StreamParser } from '../types.ts';
 import type { DashboardOptions } from './server.ts';
 import { activity, agentsOf, fileTree, overviewState, readSafeFile, runLive, wakesOf, type TreeNode, type Activity } from './data.ts';
 import { bytes, isMarkdown } from './format.ts';
@@ -26,9 +26,9 @@ function publicActivity(items: Activity[]) {
 }
 export type DashboardActivity = ReturnType<typeof publicActivity>[number];
 
-async function defaultParser(runtime: Runtime): Promise<StreamParser> {
-  const { getAdapter } = await import('../runtimes/index.ts');
-  return getAdapter(runtime).newParser();
+async function defaultParser(harness: Harness): Promise<StreamParser> {
+  const { getAdapter } = await import('../harnesses/index.ts');
+  return getAdapter(harness).newParser();
 }
 
 export function createDashboardService(opts: DashboardOptions) {
@@ -79,7 +79,7 @@ export function createDashboardService(opts: DashboardOptions) {
       let events: AgentEvent[] = [];
       if (raw && agent) {
         try {
-          const parser = await (opts.parserFor ?? defaultParser)(agent.runtime);
+          const parser = await (opts.parserFor ?? defaultParser)(agent.harness);
           for (const line of raw.split('\n')) if (line.trim()) events.push(...parser.push(line));
         } catch (err) { events = []; parserError = `transcript parser unavailable: ${String(err)}`; }
       }

@@ -68,9 +68,9 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
   out.push("## Totals", "");
   out.push(
     mdTable(
-      ["agent", "runtime / model", "wakes", "spent", "budget", "$/hour", "status"],
+      ["agent", "harness / model", "wakes", "spent", "budget", "$/hour", "status"],
       [
-        ...agents.map((a) => [a.name, `${a.runtime} / ${a.model}`, a.wake_count, $(a.spent_usd), $(a.budget_usd, 2), $(hours > 0 ? a.spent_usd / hours : NaN), a.status]),
+        ...agents.map((a) => [a.name, `${a.harness} / ${a.model}`, a.wake_count, $(a.spent_usd), $(a.budget_usd, 2), $(hours > 0 ? a.spent_usd / hours : NaN), a.status]),
         ["**run**", "", allWakes.length, $(total), swarmBudget !== null ? $(swarmBudget, 2) : "", $(hours > 0 ? total / hours : NaN), run.status],
       ],
     ),
@@ -153,12 +153,12 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
   out.push("## Per wake", "");
   const idle = wakes.filter((w) => w.tool_calls <= IDLE_TOOL_CALLS);
   out.push(mdTable(["set", "wakes", "median", "p90", "total"], [["all wakes", ...stats(wakes)], [`idle floor (≤${IDLE_TOOL_CALLS} tool calls)`, ...stats(idle)]]));
-  const byRuntime = new Map<string, WakeRow[]>();
+  const byHarness = new Map<string, WakeRow[]>();
   for (const w of wakes) {
     const rt = agents.find((a) => a.name === w.agent)?.model ?? "?";
-    byRuntime.set(rt, [...(byRuntime.get(rt) ?? []), w]);
+    byHarness.set(rt, [...(byHarness.get(rt) ?? []), w]);
   }
-  if (byRuntime.size > 1) out.push(mdTable(["model", "wakes", "median", "p90", "total"], [...byRuntime].map(([k, ws]) => [k, ...stats(ws)])));
+  if (byHarness.size > 1) out.push(mdTable(["model", "wakes", "median", "p90", "total"], [...byHarness].map(([k, ws]) => [k, ...stats(ws)])));
 
   out.push("## Overhead share", "");
   const reqByWake = new Map<number, RequestRow[]>();

@@ -11,11 +11,11 @@ import { forgeUrl } from "./forge.ts";
 import { computeCost, loadPricing, parsePricing, searchCost } from "./pricing/index.ts";
 import { generationCosts, prepareOpenRouter } from "./openrouter.ts";
 import { secretEnv } from "./controller/wake.ts";
-import { writePiModels } from "./runtimes/pi.ts";
+import { writePiModels } from "./harnesses/pi.ts";
 import { billed, issueSearchToken, readSearchLog, SEARCH_MODEL, searchDirs, searchEnv, searchHost, startSearch, stopSearch } from "./search.ts";
 import { AGENT_IMAGE, ensureAgentImage, ensureProxy } from "./proxy.ts";
-import { getAdapter } from "./runtimes/index.ts";
-import type { AgentEvent, RequestUsage, Runtime } from "./types.ts";
+import { getAdapter } from "./harnesses/index.ts";
+import type { AgentEvent, RequestUsage, Harness } from "./types.ts";
 
 type Status = "PASS" | "FAIL" | "SKIP";
 interface Result {
@@ -52,9 +52,9 @@ class Preflight {
     mkdirSync(this.root, { recursive: true });
   }
 
-  model(runtime: Runtime): string {
-    if (runtime === "pi") return piAgent(this.cfg).model;
-    return this.cfg.agents.find((a) => a.runtime === runtime)?.model ?? (runtime === "claude" ? "claude-haiku-5-5" : "gpt-6-luna");
+  model(harness: Harness): string {
+    if (harness === "pi") return piAgent(this.cfg).model;
+    return this.cfg.agents.find((a) => a.harness === harness)?.model ?? (harness === "claude" ? "claude-haiku-5-5" : "gpt-6-luna");
   }
 
   agentDirs(agent: string) {
@@ -100,19 +100,19 @@ class Preflight {
    * Run a CLI inside a container with the adapter's real command line (+ optional extra flags).
    * "lean" (what agents run) uses the filled seed as the system prompt; "stock" keeps the CLI's own.
    */
-  async cli(runtime: Runtime, agent: string, prompt: string, extraArgs: string[] = [], maxTurns = 5, harness: "lean" | "stock" = "lean"): Promise<CliRun> {
-    const adapter = getAdapter(runtime);
+  async cli(harness: Harness, agent: string, prompt: string, extraArgs: string[] = [], maxTurns = 5, setup: "lean" | "stock" = "lean"): Promise<CliRun> {
+    const adapter = getAdapter(harness);
     const dirs = this.agentDirs(agent);
     let systemPrompt: { text: string; file: string } | undefined;
-    if (harness === "lean") {
+    if (setup === "lean") {
       const s = this.cfg.scheduler;
       const text = fillSeed(readFileSync(this.cfg.paths.seed, "utf8"), { name: agent, forgeUrl: forgeUrl("preflight"), maxSleepMs: s.maxSleepMs });
       writeFileSync(join(dirs.runtime, SYSTEM_PROMPT_FILE), text);
       systemPrompt = { text, file: `${MOUNTS.runtime}/${SYSTEM_PROMPT_FILE}` };
     }
-    let argv = adapter.buildCommand({ prompt, model: this.model(runtime), effort: "medium", maxTurns, systemPrompt });
-    if (extraArgs.length) argv = runtime === "codex" ? [...argv.slice(0, -1), ...extraArgs, argv[argv.length - 1]!] : [...argv, ...extraArgs];
-    const passEnv = runtime === "pi" ? secretEnv(piAgent(this.cfg)) : runtime === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
+    let argv = adapter.buildCommand({ prompt, model: this.model(harness), effort: "medium", maxTurns, systemPrompt });
+    if (extraArgs.length) argv = harness === "codex" ? [...argv.slice(0, -1), ...extraArgs, argv[argv.length - 1]!] : [...argv, ...extraArgs];
+    const passEnv = harness === "pi" ? secretEnv(piAgent(this.cfg)) : harness === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
     const out = await this.container(agent, argv, { env: adapter.containerEnv(MOUNTS.runtime), passEnv });
     const parser = adapter.newParser();
     const lines = out.stdout.split("\n").filter((l) => l.trim());
@@ -205,7 +205,7 @@ function turnEnd(r: CliRun) {
 
 /** The pi agent the checks use: the config's first, else the sample `config/agents/fern.yaml`. */
 function piAgent(cfg: SwarmConfig): AgentConfig {
-  const a = cfg.agents.find((x) => x.runtime === "pi");
+  const a = cfg.agents.find((x) => x.harness === "pi");
   if (a) return a;
   return parseAgent(Bun.YAML.parse(readFileSync(join(cfg.paths.configDir, "agents", "fern.yaml"), "utf8")), 1, "agents/fern.yaml");
 }

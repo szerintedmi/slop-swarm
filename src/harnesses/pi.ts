@@ -3,7 +3,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { priceKey } from "../pricing/index.ts";
-import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, RuntimeAdapter, StreamParser } from "../types.ts";
+import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, HarnessAdapter, StreamParser } from "../types.ts";
 import { findFiles, n, parseJsonLine, readJsonLines, short } from "./util.ts";
 
 /** pi's tools for the lean harness (its defaults; grep/find/ls are left out, bash covers them). */
@@ -150,8 +150,8 @@ export function writePiModels(runtimeDir: string, modelsJson: unknown): void {
   writeFileSync(join(dir, "models.json"), JSON.stringify(modelsJson, null, 2) + "\n");
 }
 
-export const piAdapter: RuntimeAdapter = {
-  runtime: "pi",
+export const piAdapter: HarnessAdapter = {
+  harness: "pi",
   // No max-turns flag: the controller counts `turn_start` events and stops the container.
   maxTurnsBy: "turns",
 

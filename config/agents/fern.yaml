@@ -1,6 +1,6 @@
 # Sample OpenRouter agent (not in the default runs): add `fern` to a config's agents list to use it.
 name: fern
-runtime: pi                # claude | codex | pi (pi runs OpenRouter models)
+harness: pi                # claude | codex | pi (pi runs OpenRouter models)
 provider: openrouter       # native (default) | openrouter; pi needs openrouter
 # The slug before @ is priced (fetched from OpenRouter's catalogue at run start); the preset, set up in
 # OpenRouter with an empty system prompt, holds the provider routing.
