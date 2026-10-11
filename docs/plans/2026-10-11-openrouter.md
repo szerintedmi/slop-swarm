@@ -34,6 +34,8 @@ Let an agent run any OpenRouter model (open models first: GLM, DeepSeek, Kimi, Q
 
 ## 3. Search relay
 
+**Done** (code in `src/search.ts`, `docker/search/`, `docker/websearch`). Choices beyond the list below: one relay container per run (`slopswarm-search-<run>`, like the forge), not a shared compose service, so each run's log and tokens stay in its data dir; it reaches api.exa.ai over the egress network directly (the only host it calls, enforced in code), so api.exa.ai never goes on the proxy allowlist. Tokens are per wake (hash in the relay's tokens file, revoked at wake end). Searches are billed as request rows (model `exa-search`, `web_searches` 1, no tokens; `wakes.requests` stays model requests only) priced from a `search:` section in `pricing.yaml`; failed searches are logged, not billed. Per agent `search: native | relay` (default `relay` only for `pi`); relay agents get one prompt line and `exa-search` in `/self/pricing.yaml`. Preflight check 9. Open: a search still in flight when its wake is killed is logged after billing and stays unbilled (Exa charges it); highlights pricing on `/search` (see below).
+
 1. `docker/search/` (Bun, small): an HTTP service on `slopswarm-internal` + egress, holding `EXA_API_KEY` from `.env`. `POST /search {query, …}` → Exa `/search` (`type: auto`, ~8 results, highlights with a character cap) → compact text/JSON for the agent.
 2. Agents authenticate with a per-agent token the controller writes to the runtime dir (identifies agent + wake; useless outside the internal network).
 3. Every search is logged (agent, wake, query, result count, our computed cost, Exa's `costDollars.total`) to `data/runs/<run>/search.jsonl`; the controller ingests it into the DB as usage (it stays the only DB writer), counted in the per-wake and per-agent budgets. Our cost = Exa's documented formula; `costDollars` is the cross-check.
@@ -45,3 +47,4 @@ Let an agent run any OpenRouter model (open models first: GLM, DeepSeek, Kimi, Q
 - pi passes `…@preset/…` through unchanged (spike, §1.1).
 - OpenRouter's Anthropic-style caching for GLM via pi (`compat.cacheControlFormat`).
 - Exa `costDollars` equals the bill.
+- Whether Exa `/search` bills highlights per page ($0.001, counted in `pricing.yaml` as the worst case) or includes them; the first real searches' `costDollars` vs our cost (`just report`) settle it. No live Exa call yet (no key).

@@ -11,6 +11,7 @@ import { GITHUB_TOKEN_PATH } from "../github.ts";
 import { AGENT_IMAGE } from "../proxy.ts";
 import { parsePricing, type PricingTable } from "../pricing/index.ts";
 import { getAdapter } from "../runtimes/index.ts";
+import { readSearchLog, revokeSearchToken, runSearchDirs, searchRows } from "../search.ts";
 import type { RequestUsage } from "../types.ts";
 import { describeExtension, extraSwarmUsd, parseExtendDetail } from "../world.ts";
 import { DEPLETED_EPSILON_USD, isDepleted } from "./budget.ts";
@@ -131,7 +132,13 @@ export class Controller {
       } catch {
         /* bill nothing we cannot see */
       }
-      const { rows, total: cost } = costAll(this.pricing, usage);
+      const llm = costAll(this.pricing, usage);
+      // Relay searches of the wake (src/search.ts) are billed too; its token stops working.
+      const search = runSearchDirs(this.run.id);
+      revokeSearchToken(search, w.id);
+      const searched = searchRows(this.pricing, readSearchLog(search.logFile, w.id));
+      const rows = [...llm.rows, ...searched.rows];
+      const cost = llm.total + searched.total;
       this.repo.replaceRequests(w.id, a.name, rows);
       const endedAt = this.now();
       // Honour a next_wake.yaml written during the wake (the agent finished its turn before the crash).
@@ -143,7 +150,7 @@ export class Controller {
         ended_at: endedAt,
         exit_reason: "error",
         cost_usd: cost,
-        requests: rows.length,
+        requests: llm.rows.length,
         session_id: sessionId ?? null,
         next_in_minutes: req?.inMinutes ?? null,
         continue_requested: req ? (req.continueSession ? 1 : 0) : null,

@@ -9,10 +9,10 @@ export const PROXY_FILTER = join(REPO, "docker", "proxy", "filter");
 export const PROXY_CONTAINER = "slopswarm-proxy";
 const AGENT_DOCKERFILE = join(REPO, "docker", "agent.Dockerfile");
 /**
- * Agent image tagged by its Dockerfile's hash: worktrees with the same Dockerfile share one image,
+ * Agent image tagged by the hash of its Dockerfile and the files it copies (docker/websearch): worktrees with the same Dockerfile share one image,
  * and a branch that changes it gets its own without touching the others.
  */
-export const AGENT_IMAGE = `slopswarm-agent:${new Bun.CryptoHasher("sha256").update(readFileSync(AGENT_DOCKERFILE)).digest("hex").slice(0, 12)}`;
+export const AGENT_IMAGE = `slopswarm-agent:${new Bun.CryptoHasher("sha256").update(readFileSync(AGENT_DOCKERFILE)).update(readFileSync(join(REPO, "docker", "websearch"))).digest("hex").slice(0, 12)}`;
 
 const DOMAIN_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
 

@@ -11,6 +11,7 @@ Token-cost probe for a small society of CLI agents. The original spec, `docs/pla
   - `src/docker.ts`, `src/proxy.ts`, `docker/`: the container and egress boundary.
   - `src/forge.ts`: the run's Forgejo (the agents' shared space): containers, accounts, agent logins, notification counts.
   - `src/github.ts`: the agents' public outlet: one GitHub org and shared account, logged in per wake from `secrets/github/token`.
+  - `src/search.ts`, `docker/search/relay.ts`, `docker/websearch`: the web search relay (Exa) for agents with `search: relay`: one container per run on the internal + egress networks, per-wake tokens, `search/log/search.jsonl` billed to the wake as `exa-search` request rows. `EXA_API_KEY` reaches only the relay; api.exa.ai stays off the proxy allowlist.
   - `src/world.ts`: a run's world time and effective swarm budget, extensions included (`just extend`).
   - `src/dashboard/ui/`: SvelteKit routes/components; `src/dashboard/service.ts`: dashboard data and control queue; `src/dashboard/server.ts`: embedded Bun server. `src/report.ts`: read-only report.
 - **Invariants:**

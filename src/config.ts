@@ -9,6 +9,8 @@ export interface AgentConfig {
   model: string;
   effort: Effort;
   budgetUsd: number;
+  /** Web search: the runtime's own tool (`native`) or the run's relay via `websearch` (src/search.ts). */
+  search: "native" | "relay";
 }
 
 export interface SwarmConfig {
@@ -78,12 +80,15 @@ export function parseAgent(raw: unknown, defaultBudget: number, source: string):
   if (!AGENT_NAME_RE.test(name)) throw new ConfigError(`${source}.name: must match ${AGENT_NAME_RE}`);
   // Forgejo rejects consecutive non-alphanumerics in usernames.
   if (name.includes("--")) throw new ConfigError(`${source}.name: must not contain "--"`);
+  const runtime = oneOf(a.runtime, `${source}.runtime`, ["claude", "codex"] as const);
   return {
     name,
-    runtime: oneOf(a.runtime, `${source}.runtime`, ["claude", "codex"] as const),
+    runtime,
     model: str(a.model, `${source}.model`),
     effort: oneOf(a.effort ?? "medium", `${source}.effort`, ["low", "medium", "high"] as const),
     budgetUsd: a.budget_usd === undefined ? defaultBudget : num(a.budget_usd, `${source}.budget_usd`),
+    // Claude and Codex keep their vendors' native search; runtimes without one (pi) default to the relay.
+    search: oneOf(a.search ?? ((runtime as string) === "pi" ? "relay" : "native"), `${source}.search`, ["native", "relay"] as const),
   };
 }
 
