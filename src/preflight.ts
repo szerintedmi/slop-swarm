@@ -1,4 +1,4 @@
-// `just preflight`: plan §11 checks 1–7, and 9 (web search relay). Each prints PASS / FAIL / SKIP with a one-line reason.
+// `just preflight`: plan §11 checks 1–7, 8 (pi + OpenRouter), 9 (web search relay) and 10 (web fetch through the relay). Each prints PASS / FAIL / SKIP with a one-line reason.
 // Containers run with the same dockerRunArgs as real wakes; scratch dirs live under data/preflight/.
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -13,6 +13,7 @@ import { generationCosts, prepareOpenRouter } from "./openrouter.ts";
 import { secretEnv } from "./controller/wake.ts";
 import { writePiModels } from "./harnesses/pi.ts";
 import { billed, issueSearchToken, readSearchLog, SEARCH_MODEL, searchDirs, searchEnv, searchHost, startSearch, stopSearch } from "./search.ts";
+import { readFetchLog } from "./webfetch.ts";
 import { AGENT_IMAGE, ensureAgentImage, ensureProxy } from "./proxy.ts";
 import { getAdapter } from "./harnesses/index.ts";
 import type { AgentEvent, RequestUsage, Harness } from "./types.ts";
@@ -503,6 +504,57 @@ async function check9(pf: Preflight): Promise<Result> {
   }
 }
 
+/**
+ * Web fetch (src/webfetch.ts): from an agent container, `webfetch` gets a public page through the relay and is
+ * refused for cloud metadata, loopback, the proxy and the relay itself (Docker names), and private addresses;
+ * a direct `curl` to the same public page is still refused by the egress proxy.
+ */
+async function check10(pf: Preflight): Promise<Result> {
+  const runId = `preflight-wf-${process.pid}`;
+  const dirs = searchDirs(join(pf.root, "webfetch"));
+  const limits = pf.cfg.webfetch ?? { maxBytes: 20 * 1048576, timeoutMs: 30_000, maxRedirects: 5 };
+  const relayHost = searchHost(runId);
+  const blocked: [string, string][] = [
+    ["metadata", "http://169.254.169.254/latest/meta-data/"],
+    ["loopback", "http://127.0.0.1/"],
+    ["dashboard", "http://127.0.0.1:7777/"],
+    ["proxy", "http://slopswarm-proxy:8888/"],
+    ["proxy80", "http://slopswarm-proxy/"],
+    ["relay", `http://${relayHost}/health`],
+    ["private", "http://10.0.0.1/"],
+    ["mapped", "http://[::ffff:127.0.0.1]/"],
+    ["file", "file:///etc/passwd"],
+  ];
+  try {
+    await startSearch({ runId, network: pf.cfg.network.name, dir: dirs.base, webfetch: limits });
+    const runtime = pf.agentDirs("fetcher").runtime;
+    issueSearchToken(dirs, runtime, "fetcher", 1, { search: false });
+    const script = [
+      'webfetch https://example.com/ >/tmp/out 2>/tmp/err; echo "public=$?"; head -c 300 /tmp/out; head -c 300 /tmp/err',
+      'webfetch https://example.com/ -o /tmp/page.html >/dev/null 2>&1; echo "raw=$?"; echo "rawsize=$(wc -c </tmp/page.html)"',
+      ...blocked.map(([k, u]) => `webfetch '${u}' >/dev/null 2>/tmp/e_${k}; echo "${k}=$?"; head -c 200 /tmp/e_${k}; echo`),
+      'websearch "x" >/dev/null 2>/tmp/ws; echo "search=$?"',
+      'curl -s -m 10 -o /dev/null https://example.com/; echo "direct=$?"',
+    ].join("; ");
+    const out = await pf.container("fetcher", ["bash", "-c", script], { env: searchEnv(runId), noProxy: [relayHost] });
+    const code = (k: string) => new RegExp(`^${k}=(\\d+)`, "m").exec(out.stdout)?.[1];
+    if (code("public") !== "0") return fail(`webfetch https://example.com failed (exit ${code("public")}): ${lastLine(out.stdout + out.stderr)}`);
+    if (!/Example Domain/.test(out.stdout)) return fail(`unexpected page text: ${out.stdout.slice(0, 200)}`);
+    if (code("raw") !== "0" || !(Number(/rawsize=\s*(\d+)/.exec(out.stdout)?.[1]) > 0)) return fail(`webfetch -o failed (exit ${code("raw")})`);
+    const notBlocked = blocked.filter(([k]) => code(k) !== "4");
+    if (notBlocked.length) return fail(`not blocked: ${notBlocked.map(([k, u]) => `${u} (exit ${code(k)})`).join(", ")}`);
+    if (code("search") === "0") return fail("a fetch-only token could search");
+    const direct = code("direct");
+    if (direct === undefined || direct === "0") return fail("an agent container reached example.com directly");
+    const log = readFetchLog(dirs.fetchLogFile, 1);
+    if (log.length < 2 + blocked.length) return fail(`relay logged ${log.length} fetch(es), expected ${2 + blocked.length}`);
+    const ok = log.find((e) => e.relay_status === 200)!;
+    return pass(`example.com fetched (${ok.bytes} bytes, ${ok.latency_ms} ms) as text and raw; ${blocked.length} internal/private targets blocked; fetch-only token can't search; direct egress refused`);
+  } finally {
+    await stopSearch(runId);
+  }
+}
+
 const CHECKS: [number, string, (pf: Preflight) => Promise<Result>][] = [
   [1, "Claude in a container (OAuth, --effort)", check1],
   [2, "Codex in a container (auth refresh rotation)", check2],
@@ -513,6 +565,7 @@ const CHECKS: [number, string, (pf: Preflight) => Promise<Result>][] = [
   [7, "Lean harness overhead (stock vs lean system prompt)", check7],
   [8, "pi + OpenRouter in a container (key, preset, cost cross-check)", check8],
   [9, "Web search relay (token, log, isolation; Exa with EXA_API_KEY)", check9],
+  [10, "Web fetch through the relay (public page; private, metadata and internal hosts blocked)", check10],
 ];
 
 export async function runPreflight(opts: { swarmPath: string; only?: number[] }): Promise<boolean> {

@@ -12,6 +12,7 @@ import { generationCosts, type VendorCost } from "../openrouter.ts";
 import { computeCost, type PricingTable } from "../pricing/index.ts";
 import { getAdapter } from "../harnesses/index.ts";
 import { issueSearchToken, readSearchLog, revokeSearchToken, runSearchDirs, SEARCH_MODEL, SEARCH_PROMPT_LINE, searchEnv, searchHost, searchRows, usesRelay } from "../search.ts";
+import { webfetchPromptBlock } from "../webfetch.ts";
 import type { AgentEvent, CostBreakdown, RequestUsage, Harness, HarnessAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
 import { isDepleted, overLimit, wakeLimit, agentRemaining } from "./budget.ts";
 import type { Repo } from "./repo.ts";
@@ -227,10 +228,12 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     }
   };
 
-  // Web search through the run's relay (src/search.ts): a token for this wake only, revoked when it ends.
-  const relay = cfg.agents.some((c) => c.name === a.name && usesRelay(c)) ? runSearchDirs(repo.runId) : null;
+  // The run's relay (src/search.ts): web search for `search: relay` agents, web fetch for every agent when the
+  // world has `webfetch:` (src/webfetch.ts). A token for this wake only, revoked when it ends.
+  const searchRelay = cfg.agents.some((c) => c.name === a.name && usesRelay(c));
+  const relay = searchRelay || cfg.webfetch ? runSearchDirs(repo.runId) : null;
   /** This wake's relay searches as request rows (no tokens, one web search each, priced from the run's snapshot). */
-  const searches = () => (relay ? searchRows(deps.pricing, readSearchLog(relay.logFile, wakeId)) : { rows: [], total: 0 });
+  const searches = () => (relay && searchRelay ? searchRows(deps.pricing, readSearchLog(relay.logFile, wakeId)) : { rows: [], total: 0 });
 
   const done = (async (): Promise<WakeOutcome> => {
     const unread = await unreadOf();
@@ -245,7 +248,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     const limit = wakeLimit(cfg.budgets.perWake.maxUsd, agentRemaining(a), swarmRemaining);
 
     // The agent sees only its own models' prices; costing above keeps the full table.
-    writeSelf(dirs.self, a.budget_usd, previous, deps.pricingYaml, [...repo.agentModels(a.name), ...(relay ? [SEARCH_MODEL] : [])]);
+    writeSelf(dirs.self, a.budget_usd, previous, deps.pricingYaml, [...repo.agentModels(a.name), ...(searchRelay ? [SEARCH_MODEL] : [])]);
 
     if (a.harness === "codex" && !existsSync(join(dirs.runtime, "auth.json"))) {
       if (!existsSync(deps.codexAuthPath)) throw new Error(`codex auth missing: ${deps.codexAuthPath}`);
@@ -258,15 +261,18 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       writeGithubLogin(dirs.runtime, cfg.github.user, readFileSync(deps.githubTokenPath, "utf8").trim());
     }
 
-    if (relay) issueSearchToken(relay, dirs.runtime, a.name, wakeId);
+    if (relay) issueSearchToken(relay, dirs.runtime, a.name, wakeId, { search: searchRelay });
 
     // Only a next_wake.yaml written (or rewritten) during this wake counts.
     const nwPath = join(dirs.home, "next_wake.yaml");
     const nwBefore = statSync(nwPath, { throwIfNoEntry: false })?.mtimeMs;
 
-    // Lean harness: the filled seed is the whole system prompt; the user turn is the wake note.
+    // Lean harness: the filled seed is the whole system prompt; the user turn is the wake note. Every harness
+    // gets it (claude --system-prompt, codex model_instructions_file, pi --system-prompt), web tool lines included.
     const seed =
-      fillSeed(deps.seed, { name: a.name, forgeUrl: forgeUrl(repo.runId), maxSleepMs: cfg.scheduler.maxSleepMs, github: cfg.github }) + (relay ? SEARCH_PROMPT_LINE : "");
+      fillSeed(deps.seed, { name: a.name, forgeUrl: forgeUrl(repo.runId), maxSleepMs: cfg.scheduler.maxSleepMs, github: cfg.github }) +
+      (searchRelay ? SEARCH_PROMPT_LINE : "") +
+      (cfg.webfetch ? webfetchPromptBlock(cfg.webfetch) : "");
     writeFileSync(join(dirs.runtime, SYSTEM_PROMPT_FILE), seed);
     const argv = adapter.buildCommand({
       prompt: wakeNote({
@@ -287,7 +293,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       maxTurns: cfg.budgets.perWake.maxTurns,
       resumeSessionId: resumeId,
       // On the relay the harness's own search tool is off, so the agent doesn't have both.
-      nativeSearch: relay === null,
+      nativeSearch: !searchRelay,
     });
     const spec: ContainerSpec = {
       name: containerName,

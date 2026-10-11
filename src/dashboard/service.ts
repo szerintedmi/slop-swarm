@@ -1,9 +1,11 @@
 // Host-side data service. Database/file handles never enter SvelteKit load results.
-import { agentDirs, enqueueControl, getRun, type AgentRow, type ControlAction, type EventRow, type RequestRow, type RunRow, type WakeRow } from '../db/index.ts';
+import { join } from 'node:path';
+import { agentDirs, enqueueControl, getRun, runDir, type AgentRow, type ControlAction, type EventRow, type RequestRow, type RunRow, type WakeRow } from '../db/index.ts';
 import type { AgentEvent, Harness, StreamParser } from '../types.ts';
 import type { DashboardOptions } from './server.ts';
 import { activity, agentsOf, fileTree, overviewState, readSafeFile, runLive, wakesOf, type TreeNode, type Activity } from './data.ts';
 import { bytes, isMarkdown } from './format.ts';
+import { readFetchLog } from '../webfetch.ts';
 
 const ACTIONS: readonly ControlAction[] = ['pause', 'unpause', 'wake', 'stop', 'kill'];
 const AGENT_ACTIONS: readonly ControlAction[] = ['pause', 'unpause', 'wake'];
@@ -92,7 +94,9 @@ export function createDashboardService(opts: DashboardOptions) {
         seen.add(e.usage.requestId);
         return [lastUsage.get(e.usage.requestId)!];
       });
-      return { kind: 'wake' as const, wake: publicWake(wake), requests, unseen: requests.filter(r => !seen.has(r.request_id)), events, rawNote, parserError, live: wake.ended_at == null };
+      // Web fetches are free and not in the DB; the relay's log has them (src/webfetch.ts).
+      const webFetches = readFetchLog(join(runDir(wake.run_id), 'search', 'log', 'fetch.jsonl'), wake.id).length;
+      return { kind: 'wake' as const, wake: publicWake(wake), webFetches, requests, unseen: requests.filter(r => !seen.has(r.request_id)), events, rawNote, parserError, live: wake.ended_at == null };
     }
     if (!run) return path === '/' ? { kind: 'empty' as const } : { kind: 'missing' as const, status: 404, message: 'no runs yet' };
     if (path === '/') return { kind: 'overview' as const, run: publicRun(run), state: overviewState(db, run), feed: publicActivity(activity(db, run, 80)), readonly, live: runLive(run) };

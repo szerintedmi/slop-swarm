@@ -86,7 +86,10 @@ class ClaudeParser implements StreamParser {
   }
 }
 
-/** Tools for the lean harness. WebFetch is left out: it fetches client-side and the proxy blocks it. */
+/**
+ * Tools for the lean harness. WebFetch is left out: it fetches client-side and the proxy blocks it. Agents read
+ * pages with the `webfetch` CLI through the run's relay instead, when the world has `webfetch:` (src/webfetch.ts).
+ */
 export const LEAN_TOOLS = "Bash,Read,Write,Edit,WebSearch";
 /** The lean tools without Claude Code's own web search, for agents on the relay (`search: relay`). */
 export const LEAN_TOOLS_NO_SEARCH = LEAN_TOOLS.split(",").filter((t) => t !== "WebSearch").join(",");

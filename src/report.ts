@@ -2,6 +2,7 @@
 import type { Database } from "bun:sqlite";
 import type { AgentRow, RequestRow, RunRow, WakeRow } from "./db/index.ts";
 import { billed, readSearchLog, runSearchDirs, SEARCH_MODEL } from "./search.ts";
+import { fetched, readFetchLog, type FetchLogEntry } from "./webfetch.ts";
 import { describeExtension, extensionsOf, swarmBudgetUsd, worldGaps, worldTime } from "./world.ts";
 
 export function quantile(xs: number[], q: number): number {
@@ -150,6 +151,9 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
     if (lat.length) out.push(`Latency: median ${n(median(lat))} ms, p90 ${n(quantile(lat, 0.9))} ms.`, "");
   }
 
+  const fetches = readFetchLog(runSearchDirs(runId).fetchLogFile);
+  if (fetches.length) out.push("## Web fetch (relay)", "", ...fetchSummary(fetches), "");
+
   out.push("## Per wake", "");
   const idle = wakes.filter((w) => w.tool_calls <= IDLE_TOOL_CALLS);
   out.push(mdTable(["set", "wakes", "median", "p90", "total"], [["all wakes", ...stats(wakes)], [`idle floor (≤${IDLE_TOOL_CALLS} tool calls)`, ...stats(idle)]]));
@@ -237,4 +241,29 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
   } else out.push("_not enough data_", "");
 
   return out.join("\n");
+}
+
+/** Web fetches are free; the report shows what was fetched and what the guard refused (relay log, not the DB). */
+export function fetchSummary(log: FetchLogEntry[]): string[] {
+  const ok = log.filter(fetched);
+  const httpErrors = ok.filter((e) => e.status === null || e.status < 200 || e.status > 299).length;
+  const blocked = log.filter((e) => !fetched(e) && e.blocked);
+  const failed = log.filter((e) => !fetched(e) && !e.blocked);
+  const count = (xs: string[]) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]);
+  const list = (xs: string[], max = 5) => count(xs).slice(0, max).map(([k, v]) => `${k} ${v}`).join(", ");
+  const host = (e: FetchLogEntry) => {
+    try {
+      return new URL(e.final_url ?? e.url).hostname;
+    } catch {
+      return "?";
+    }
+  };
+  const lines = [
+    `${log.length} fetch(es): ${ok.length} answered (${n(ok.reduce((s, e) => s + e.bytes, 0))} bytes${httpErrors ? `, ${httpErrors} with an HTTP error status` : ""}, ${ok.filter((e) => e.raw).length} saved raw)` +
+      `, ${blocked.length} blocked, ${failed.length} failed. By agent: ${list(log.map((e) => e.agent), 20)}.`,
+  ];
+  if (ok.length) lines.push(`Top hosts: ${list(ok.map(host))}.`);
+  if (blocked.length) lines.push(`Blocked: ${list(blocked.map((e) => e.blocked!.replace(/^[^ ]+ (is|resolves)/, "<host> $1").replace(/ \(.*\)$/, "")))}.`);
+  if (failed.length) lines.push(`Failed: ${list(failed.map((e) => (e.error ?? "error").split(":")[0]!))}.`);
+  return lines;
 }

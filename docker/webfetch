@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# webfetch: GET a public URL through the run's relay (src/webfetch.ts, docker/search/webfetch.ts). Installed in
+# the agent image; works from any harness. The agent never connects out itself: the relay fetches, refuses
+# private addresses, and logs every fetch. The relay URL and the wake's token file come from the container env.
+usage() {
+  cat >&2 <<'USAGE'
+usage: webfetch URL [-o FILE]
+  prints the page as readable text (HTML converted to markdown-ish text; long pages are cut)
+  -o FILE   save the raw bytes to FILE instead (any type: pdf, zip, images, the page's HTML, ...)
+GET only, public http(s) on ports 80/443; no logins, cookies, forms or JavaScript. Every fetch is logged.
+exit: 0 ok, 1 failed, 2 usage/bad URL, 3 not available, 4 blocked, 5 too large, 6 timeout,
+      7 the site answered with an HTTP error (page still shown/saved), 8 not text (use -o)
+USAGE
+  exit 2
+}
+
+url="" out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o|--output) [ $# -ge 2 ] || usage; out="$2"; shift 2 ;;
+    --output=*) out="${1#--output=}"; shift ;;
+    -h|--help) usage ;;
+    --) shift; [ $# -eq 1 ] && [ -z "$url" ] || usage; url="$1"; shift ;;
+    -*) echo "webfetch: unknown option $1" >&2; usage ;;
+    *) [ -z "$url" ] || usage; url="$1"; shift ;;
+  esac
+done
+[ -n "$url" ] || usage
+[ "$out" != "-" ] || { echo "webfetch: -o needs a file name" >&2; exit 2; }
+
+relay="${SLOPSWARM_SEARCH_URL:-}"
+token_file="${SLOPSWARM_SEARCH_TOKEN_FILE:-/runtime/search/token}"
+if [ -z "$relay" ] || [ ! -r "$token_file" ]; then
+  echo "webfetch: web fetch is not available in this wake" >&2
+  exit 3
+fi
+
+raw=false
+[ -z "$out" ] || raw=true
+body=$(jq -cn --arg u "$url" --argjson raw "$raw" '{url: $u, raw: $raw}') || { echo "webfetch: could not build the request" >&2; exit 2; }
+
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp" "$tmp.h" "$tmp.err"' EXIT
+# The token goes in through a header file (process substitution), so it never shows in argv.
+code=$(curl -sS --noproxy '*' --max-time 180 -o "$tmp" -D "$tmp.h" -w '%{http_code}' \
+  -H @<(printf 'Authorization: Bearer %s\n' "$(tr -d '[:space:]' < "$token_file")") \
+  -H 'content-type: application/json' --data-binary "$body" "${relay%/}/fetch" 2>"$tmp.err")
+if [ $? -ne 0 ]; then
+  echo "webfetch: relay unreachable ($(head -c 200 "$tmp.err"))" >&2
+  exit 1
+fi
+
+meta() { grep -i "^x-webfetch-$1:" "$tmp.h" | tail -n 1 | cut -d: -f2- | tr -d '\r' | sed 's/^ *//'; }
+
+case "$code" in
+  200)
+    status=$(meta status)
+    if [ "$raw" = true ]; then
+      cat "$tmp" > "$out" || { echo "webfetch: could not write $out" >&2; exit 1; }
+      echo "saved $(meta bytes) bytes ($(meta type | cut -d';' -f1), HTTP $status) from $(meta url) to $out"
+    else
+      cat "$tmp"
+    fi
+    case "$status" in
+      2*) exit 0 ;;
+      *) echo "webfetch: the site answered HTTP $status" >&2; exit 7 ;;
+    esac
+    ;;
+esac
+msg="$(head -c 500 "$tmp")"
+echo "${msg:-webfetch: relay answered HTTP $code}" >&2
+case "$code" in
+  400) exit 2 ;;
+  503) exit 3 ;;
+  403) exit 4 ;;
+  413) exit 5 ;;
+  504) exit 6 ;;
+  415) exit 8 ;;
+  *) exit 1 ;;
+esac

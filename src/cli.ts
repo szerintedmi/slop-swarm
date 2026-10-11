@@ -16,7 +16,7 @@ import { prepareOpenRouter } from "./openrouter.ts";
 import { AGENT_IMAGE, buildImages, ensureAgentImage, ensureProxy } from "./proxy.ts";
 import { runPreflight } from "./preflight.ts";
 import { parsePricing } from "./pricing/index.ts";
-import { checkSearchSetup, ensureSearchImage, searchHost, startSearch, stopSearch, usesRelay } from "./search.ts";
+import { checkSearchSetup, ensureSearchImage, relayNeeded, searchHost, startSearch, stopSearch } from "./search.ts";
 import { renderReport } from "./report.ts";
 import { getAdapter } from "./harnesses/index.ts";
 import { writePiModels } from "./harnesses/pi.ts";
@@ -117,9 +117,12 @@ async function bringUpForge(runId: string, cfg: ReturnType<typeof loadSwarm>, po
   return { client, url: client.baseUrl };
 }
 
-/** Start the run's web search relay if any agent uses it (src/search.ts). Runs start without EXA_API_KEY (searches answer "unavailable"). */
+/**
+ * Start the run's relay if any agent searches through it or the world has webfetch (src/search.ts, src/webfetch.ts).
+ * Runs start without EXA_API_KEY (searches answer "unavailable").
+ */
 async function bringUpSearch(runId: string, cfg: ReturnType<typeof loadSwarm>): Promise<void> {
-  if (!cfg.agents.some(usesRelay)) return;
+  if (!relayNeeded(cfg)) return;
   const fail = (msg: string): never => {
     openDb().query("UPDATE runs SET status = 'stopped', stop_reason = 'search relay did not start', ended_at = ? WHERE id = ? AND status = 'running'").run(Date.now(), runId);
     die(msg);
@@ -128,12 +131,12 @@ async function bringUpSearch(runId: string, cfg: ReturnType<typeof loadSwarm>): 
   if (check.error) fail(check.error);
   for (const w of check.warnings) console.log(`warning: ${w}`);
   try {
-    await startSearch({ runId, network: cfg.network.name });
+    await startSearch({ runId, network: cfg.network.name, webfetch: cfg.webfetch });
   } catch (e) {
     await stopSearch(runId);
     fail((e as Error).message);
   }
-  console.log(`search relay: ${searchHost(runId)} (internal only)`);
+  console.log(`relay: ${searchHost(runId)} (agents reach it on the internal network only${cfg.webfetch ? "; webfetch on" : ""})`);
 }
 
 /** Dashboard port: PORT env overrides the default 7777. */

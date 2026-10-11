@@ -3,14 +3,15 @@
 // network (it reaches api.exa.ai, the only host it calls). Agents never reach Exa directly: api.exa.ai is not
 // on the proxy allowlist, and the key lives only in the relay's env.
 //
-// Per wake of an agent with `search: relay`, the controller issues a token (runtime dir, read by `websearch`)
-// and registers its hash in the relay's tokens file; the entry is removed when the wake ends. The relay logs
+// Per wake of an agent with `search: relay` (and of every agent when the world has `webfetch:`, src/webfetch.ts),
+// the controller issues a token (runtime dir, read by `websearch` / `webfetch`) and registers its hash in the
+// relay's tokens file, with whether it may search; the entry is removed when the wake ends. The relay logs
 // every search to search/log/search.jsonl; the controller (the only DB writer) prices each line from the run's
 // pricing snapshot (`search:` in pricing.yaml) and bills it to the wake as a request row (model `exa-search`,
 // one web search, no tokens), so it counts in the per-wake, per-agent and swarm budgets like any request.
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentConfig, SwarmConfig } from "./config.ts";
+import type { AgentConfig, SwarmConfig, WebfetchConfig } from "./config.ts";
 import { runDir } from "./db/index.ts";
 import { MOUNTS } from "./docker.ts";
 import { searchCost, type PricingTable } from "./pricing/index.ts";
@@ -28,6 +29,7 @@ const EGRESS_NETWORK = "slopswarm-egress";
 export const SEARCH_IMAGE = `slopswarm-search:${new Bun.CryptoHasher("sha256")
   .update(readFileSync(join(SEARCH_CONTEXT, "Dockerfile")))
   .update(readFileSync(join(SEARCH_CONTEXT, "relay.ts")))
+  .update(readFileSync(join(SEARCH_CONTEXT, "webfetch.ts")))
   .digest("hex")
   .slice(0, 12)}`;
 
@@ -39,6 +41,11 @@ export function usesRelay(a: Pick<AgentConfig, "search">): boolean {
   return a.search === "relay";
 }
 
+/** The run needs its relay: some agent searches through it, or the world has webfetch (every agent may fetch). */
+export function relayNeeded(cfg: Pick<SwarmConfig, "agents" | "webfetch">): boolean {
+  return cfg.agents.some(usesRelay) || !!cfg.webfetch;
+}
+
 /** Container name = hostname agents use. Kept within a DNS label (63 chars). */
 export function searchHost(runId: string): string {
   const name = `slopswarm-search-${runId}`.replace(/[^a-zA-Z0-9-]/g, "-");
@@ -48,9 +55,16 @@ export function searchHost(runId: string): string {
 }
 export const searchUrl = (runId: string) => `http://${searchHost(runId)}:${SEARCH_PORT}`;
 
-/** Host dirs: `tokens/` (mounted read-only into the relay) and `log/` (its only writable mount). */
+/** Host dirs: `tokens/` (mounted read-only into the relay) and `log/` (its only writable mount: search.jsonl, fetch.jsonl). */
 export function searchDirs(base: string) {
-  return { base, tokens: join(base, "tokens"), log: join(base, "log"), tokensFile: join(base, "tokens", "tokens.json"), logFile: join(base, "log", "search.jsonl") };
+  return {
+    base,
+    tokens: join(base, "tokens"),
+    log: join(base, "log"),
+    tokensFile: join(base, "tokens", "tokens.json"),
+    logFile: join(base, "log", "search.jsonl"),
+    fetchLogFile: join(base, "log", "fetch.jsonl"),
+  };
 }
 export const runSearchDirs = (runId: string) => searchDirs(join(runDir(runId), "search"));
 
@@ -58,14 +72,14 @@ export const runSearchDirs = (runId: string) => searchDirs(join(runDir(runId), "
 export const tokenPath = (runtimeDir: string) => join(runtimeDir, "search", "token");
 export const TOKEN_FILE_IN = `${MOUNTS.runtime}/search/token`;
 
-/** Container env of a wake that may search. */
+/** Container env of a wake that may use the relay (`websearch` and `webfetch` both read it). */
 export function searchEnv(runId: string): Record<string, string> {
   return { SLOPSWARM_SEARCH_URL: searchUrl(runId), SLOPSWARM_SEARCH_TOKEN_FILE: TOKEN_FILE_IN };
 }
 
 const sha256 = (s: string) => new Bun.CryptoHasher("sha256").update(s).digest("hex");
 
-type TokenMap = Record<string, { agent: string; wake: number }>;
+type TokenMap = Record<string, { agent: string; wake: number; search: boolean }>;
 
 function readTokens(file: string): TokenMap {
   try {
@@ -83,14 +97,15 @@ function writeTokens(file: string, map: TokenMap): void {
 }
 
 /**
- * Give a wake a fresh search token: the token goes to the agent's runtime dir, its hash to the relay's
+ * Give a wake a fresh relay token: the token goes to the agent's runtime dir, its hash to the relay's
  * tokens file (so neither file alone is a usable copy of the other). Earlier tokens of the agent are dropped.
+ * `search: false`: the token may only fetch (an agent on its harness's own search, in a world with webfetch).
  */
-export function issueSearchToken(dirs: ReturnType<typeof searchDirs>, runtimeDir: string, agent: string, wake: number): void {
+export function issueSearchToken(dirs: ReturnType<typeof searchDirs>, runtimeDir: string, agent: string, wake: number, { search = true }: { search?: boolean } = {}): void {
   mkdirSync(dirs.tokens, { recursive: true });
   const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
   const map = Object.fromEntries(Object.entries(readTokens(dirs.tokensFile)).filter(([, v]) => v.agent !== agent));
-  map[sha256(token)] = { agent, wake };
+  map[sha256(token)] = { agent, wake, search };
   writeTokens(dirs.tokensFile, map);
   mkdirSync(join(runtimeDir, "search"), { recursive: true });
   writeFileSync(tokenPath(runtimeDir), token + "\n");
@@ -160,8 +175,14 @@ export function checkSearchSetup(cfg: Pick<SwarmConfig, "agents">, pricing: Pric
   };
 }
 
+/** Relay env that turns /fetch on (docker/search/relay.ts webfetchFromEnv). Limits only, nothing secret. */
+export function webfetchRelayEnv(w: WebfetchConfig | undefined): string[] {
+  if (!w) return [];
+  return ["-e", `WEBFETCH_MAX_BYTES=${w.maxBytes}`, "-e", `WEBFETCH_TIMEOUT_MS=${w.timeoutMs}`, "-e", `WEBFETCH_MAX_REDIRECTS=${w.maxRedirects}`];
+}
+
 /** `docker run` argv for the relay. The key is passed by name (`-e EXA_API_KEY`), so it never shows in argv. */
-export function searchRunArgs(o: { runId: string; image: string; network: string; dir: string; withKey: boolean }): string[] {
+export function searchRunArgs(o: { runId: string; image: string; network: string; dir: string; withKey: boolean; webfetch?: WebfetchConfig }): string[] {
   const d = searchDirs(o.dir);
   return [
     "docker", "run", "-d", "--rm",
@@ -175,12 +196,14 @@ export function searchRunArgs(o: { runId: string; image: string; network: string
     "--cpus", "0.5",
     "--memory", "256m",
     "--pids-limit", "64",
-    // Internal: agents reach it. Egress: its route to api.exa.ai (the only host relay.ts calls).
+    // Internal: agents reach it. Egress: its route to api.exa.ai (the only host /search calls) and, with webfetch,
+    // to public web servers (/fetch refuses every non-public address, so not the internal network either).
     "--network", o.network,
     "--network", EGRESS_NETWORK,
     "-v", `${d.tokens}:/tokens:ro`,
     "-v", `${d.log}:/log:rw`,
     ...(o.withKey ? ["-e", "EXA_API_KEY"] : []),
+    ...webfetchRelayEnv(o.webfetch),
     o.image,
   ];
 }
@@ -207,7 +230,7 @@ export async function stopSearch(runId: string): Promise<void> {
 }
 
 /** Start the run's relay (replacing a leftover) and wait until it answers on the internal network. */
-export async function startSearch(o: { runId: string; network: string; dir?: string }): Promise<void> {
+export async function startSearch(o: { runId: string; network: string; dir?: string; webfetch?: WebfetchConfig }): Promise<void> {
   const dir = o.dir ?? runSearchDirs(o.runId).base;
   const d = searchDirs(dir);
   mkdirSync(d.tokens, { recursive: true });
@@ -215,7 +238,7 @@ export async function startSearch(o: { runId: string; network: string; dir?: str
   if (!existsSync(d.tokensFile)) writeTokens(d.tokensFile, {});
   await ensureSearchImage();
   await stopSearch(o.runId);
-  const r = await docker(searchRunArgs({ runId: o.runId, image: SEARCH_IMAGE, network: o.network, dir, withKey: !!process.env.EXA_API_KEY?.trim() }));
+  const r = await docker(searchRunArgs({ runId: o.runId, image: SEARCH_IMAGE, network: o.network, dir, withKey: !!process.env.EXA_API_KEY?.trim(), webfetch: o.webfetch }));
   if (r.code !== 0) throw new Error(`search relay did not start: ${r.err.trim()}`);
   // No host port: probe from inside the container.
   const until = Date.now() + 20_000;

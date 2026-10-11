@@ -12,12 +12,14 @@ Token-cost probe for a small society of CLI agents. The original spec, `docs/pla
   - `src/docker.ts`, `src/proxy.ts`, `docker/`: the container and egress boundary.
   - `src/forge.ts`: the run's Forgejo (the agents' shared space): containers, accounts, agent logins, notification counts.
   - `src/github.ts`: the agents' public outlet: one GitHub org and shared account, logged in per wake from `secrets/github/token`.
-  - `src/search.ts`, `docker/search/relay.ts`, `docker/websearch`: the web search relay (Exa) for agents with `search: relay`: one container per run on the internal + egress networks, per-wake tokens, `search/log/search.jsonl` billed to the wake as `exa-search` request rows. `EXA_API_KEY` reaches only the relay; api.exa.ai stays off the proxy allowlist.
+  - `src/search.ts`, `docker/search/relay.ts`, `docker/websearch`: the web search relay (Exa) for agents with `search: relay`: one container per run on the internal + egress networks, per-wake tokens, `search/log/search.jsonl` billed to the wake as `exa-search` request rows. `EXA_API_KEY` reaches only the relay; api.exa.ai stays off the proxy allowlist. The same container serves web fetch when the config has `webfetch:` (then every wake gets a token; `search: false` tokens can only fetch).
+  - `src/webfetch.ts`, `docker/search/webfetch.ts`, `docker/webfetch`: every agent's GET-only downloads of public URLs through the relay (`webfetch:` in the swarm config); the SSRF guard is in `docker/search/webfetch.ts`.
   - `src/world.ts`: a run's world time and effective swarm budget, extensions included (`just extend`).
   - `src/dashboard/ui/`: SvelteKit routes/components; `src/dashboard/service.ts`: dashboard data and control queue; `src/dashboard/server.ts`: embedded Bun server. `src/report.ts`: read-only report.
 - **Invariants:**
   - Cost is computed per API request; vendor totals are only a cross-check.
   - Never weaken the container flags or the egress allowlist without being asked. The forge container stays on the internal network only (no route out).
+  - Web fetch (added at the owner's request) goes through the relay only: keep it GET-only, public addresses only (every resolved address and every redirect hop checked, connection pinned to the vetted address), ports 80/443; never add its targets to the proxy allowlist.
   - Never print or commit secrets (`.env`, `secrets/`).
   - Committed fixtures must be scrubbed of identities, but keep their token counts.
 - **Worktrees:** each has its own `./data` (`SLOPSWARM_DATA_DIR` to point elsewhere). The dashboard defaults to port 7777 and the run's forge to `127.0.0.1:3300`; if either is taken, the next free port is used and printed (`PORT=` / `FORGE_PORT=` pick the starting port). After a run ends, `just up`/`smoke`/`resume` keep both up until Ctrl-C. The proxy has no host port. The egress proxy is shared; the agent image is tagged with the Dockerfile hash and built on demand.

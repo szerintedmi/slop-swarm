@@ -32,8 +32,8 @@ RUN case "${TARGETARCH}" in arm64) sum="${GH_SHA256_ARM64}" ;; amd64) sum="${GH_
 RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" "@earendil-works/pi-coding-agent@${PI_VERSION}" \
  && npm cache clean --force
 
-# Web search through the run's relay (src/search.ts), for any runtime.
-COPY --chmod=0755 websearch /usr/local/bin/websearch
+# Web search and web fetch through the run's relay (src/search.ts, src/webfetch.ts), for any harness.
+COPY --chmod=0755 websearch webfetch /usr/local/bin/
 
 # node:22 ships a `node` user with uid 1000; rename it to `agent` so files on the bind mounts line up.
 RUN usermod -l agent -d /home/agent -m node && groupmod -n agent node

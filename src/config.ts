@@ -43,10 +43,18 @@ export interface SwarmConfig {
   forge: { image: string; port: number; pollMs: number };
   /** The agents' public outlet: a GitHub org they all reach through one shared account. Absent = no GitHub. */
   github?: { org: string; user: string };
+  /** Agents' `webfetch <url>`: GET-only downloads of public URLs through the run's relay (src/webfetch.ts). Absent = off. */
+  webfetch?: WebfetchConfig;
   /** Absolute path of the config file and the seed/pricing files next to it. */
   paths: { swarm: string; seed: string; pricing: string; configDir: string };
   /** Raw YAML text of swarm + agents, snapshotted into the runs table. */
   snapshot: string;
+}
+
+export interface WebfetchConfig {
+  maxBytes: number;
+  timeoutMs: number;
+  maxRedirects: number;
 }
 
 export class ConfigError extends Error {}
@@ -196,8 +204,30 @@ export function parseSwarm(
   if (cfg.scheduler.maxSleepMs > cfg.run.maxDurationMs) throw new ConfigError("scheduler: max_sleep_min longer than run.max_duration_min");
   if (agents.some((a) => a.provider === "openrouter") && !onAllowlist(cfg.network.allowlist, OPENROUTER_DOMAIN))
     throw new ConfigError(`network.allowlist needs ${OPENROUTER_DOMAIN} for the OpenRouter agents`);
-  if (s.github === undefined) return cfg;
-  return { ...cfg, github: parseGithub(s.github, cfg.network.allowlist) };
+  return {
+    ...cfg,
+    ...(s.github !== undefined ? { github: parseGithub(s.github, cfg.network.allowlist) } : {}),
+    ...(s.webfetch !== undefined && s.webfetch !== false ? { webfetch: parseWebfetch(s.webfetch) } : {}),
+  };
+}
+
+/** Upper bounds keep one fetch from tying up the relay (256 MB memory, one deadline per fetch). */
+export const WEBFETCH_MAX = { mb: 100, timeoutS: 120, redirects: 10 } as const;
+
+/** `webfetch:` (an empty section takes the defaults; remove it or set `false` to turn webfetch off). */
+function parseWebfetch(raw: unknown): WebfetchConfig {
+  const w = obj(raw ?? {}, "webfetch");
+  const bounded = (v: unknown, field: string, min: number, max: number, int = false) => {
+    const n = num(v, field, { min });
+    if (n > max || (int && !Number.isInteger(n))) throw new ConfigError(`${field}: expected ${int ? "an integer" : "a number"} ${min}–${max}`);
+    return n;
+  };
+  const mb = bounded(w.max_mb ?? 20, "webfetch.max_mb", 0.001, WEBFETCH_MAX.mb);
+  return {
+    maxBytes: Math.round(mb * 1024 * 1024),
+    timeoutMs: bounded(w.timeout_s ?? 30, "webfetch.timeout_s", 1, WEBFETCH_MAX.timeoutS) * S,
+    maxRedirects: bounded(w.max_redirects ?? 5, "webfetch.max_redirects", 0, WEBFETCH_MAX.redirects, true),
+  };
 }
 
 function onAllowlist(allowlist: string[], domain: string): boolean {

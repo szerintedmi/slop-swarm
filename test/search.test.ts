@@ -118,7 +118,7 @@ describe("relay handler", () => {
     expect(statSync(tokenPath(runtime)).mode & 0o777).toBe(0o600);
     // The relay's file holds only the token's hash.
     expect(readFileSync(d.tokensFile, "utf8")).not.toContain(token);
-    expect(lookupToken(d.tokensFile, `Bearer ${token}`)).toEqual({ agent: "wren", wake: 7 });
+    expect(lookupToken(d.tokensFile, `Bearer ${token}`)).toEqual({ agent: "wren", wake: 7, search: true });
 
     // A new wake's token replaces the agent's old one.
     issueSearchToken(d, runtime, "wren", 8);
@@ -200,8 +200,8 @@ describe("relay handler", () => {
 
   test("health and routing", async () => {
     const d = scratch();
-    expect(await (await relay(d).handler(new Request("http://relay/health"))).json()).toEqual({ ok: true, exa: true });
-    expect(await (await relay(d, { apiKey: undefined }).handler(new Request("http://relay/health"))).json()).toEqual({ ok: true, exa: false });
+    expect(await (await relay(d).handler(new Request("http://relay/health"))).json()).toEqual({ ok: true, exa: true, webfetch: false });
+    expect(await (await relay(d, { apiKey: undefined }).handler(new Request("http://relay/health"))).json()).toEqual({ ok: true, exa: false, webfetch: false });
     expect((await relay(d).handler(new Request("http://relay/search"))).status).toBe(405);
     expect((await relay(d).handler(new Request("http://relay/other"))).status).toBe(404);
   });

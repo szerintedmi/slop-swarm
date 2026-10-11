@@ -1,4 +1,4 @@
-# OpenRouter models, the pi harness and a search relay
+# OpenRouter models, the pi harness, a search relay and web fetch
 
 - **Status:** open
 - **Date:** 2026-10-11
@@ -53,6 +53,20 @@ Done.
 3. Every search is logged (agent, wake, query, result count, our computed cost, Exa's `costDollars.total`) to `data/runs/<run>/search.jsonl`; the controller ingests it into the DB as usage (it stays the only DB writer), counted in the per-wake and per-agent budgets. Our cost = Exa's documented formula; `costDollars` is the cross-check.
 4. `websearch "query"` CLI in the agent image; one line in the pi system prompt. Errors (Exa down, cap reached → 402) return a short message to the agent, never fail the wake.
 5. Claude and Codex agents keep their vendors' native search; recorded as a known difference.
+
+## 4. Web fetch (`webfetch`)
+
+**Done** (owner decision "option B": agents of every harness may read pages and download files, without opening the egress proxy). Code in `docker/search/webfetch.ts` (guard, fetch, HTML → text), `docker/search/relay.ts` (`POST /fetch`), `docker/webfetch` (CLI), `src/webfetch.ts` (prompt block, log reader).
+
+1. ✅ Config: optional swarm-wide `webfetch: {max_mb, timeout_s, max_redirects}` (defaults 20 / 30 / 5; bounds 100 MB / 120 s / 10); absent or `false` = off. On in `config/swarm.yaml` and `config/smoke.yaml`.
+2. ✅ The relay runs when an agent has `search: relay` **or** the world has webfetch; then every wake gets a relay token, `search: false` unless the agent searches through the relay (such tokens get 403 on `/search`). The limits reach the relay as `WEBFETCH_*` env; without them `/fetch` answers 503.
+3. ✅ Guard: http/https only, ports 80/443 only, no credentials in URLs, GET only with a fixed User-Agent and no agent headers/cookies/body. The relay resolves the hostname and refuses if any address is not public unicast (IPv4 special-purpose ranges incl. RFC 1918, CGNAT, 169.254/16, 198.18/15, multicast, reserved; IPv6 outside 2000::/3 and its documentation/Teredo blocks; mapped/NAT64/6to4 judged by their IPv4). Single-label names (Docker containers) and .local/.internal/.localhost/… are refused before DNS. The connection goes to the vetted address (`node:https` with `host` = IP, `servername` = hostname, so SNI and the certificate check use the name); redirects are followed by hand and each hop is checked the same way. One deadline for the whole fetch, a byte cap on the decoded body (Content-Length up front, then while streaming; gzip/deflate decoded under the cap).
+4. ✅ Answers: HTML → markdown-ish text by a small dependency-free converter (drops script/style/nav/footer/aside, prefers `<main>`/`<article>`, keeps headings, lists, code blocks, table rows, `[text](absolute url)` links), cut at 40K characters; other text types as text; binary without `-o` → "use -o" (exit 8); `-o` returns the bytes. A one-line header gives final URL, status, type and size. The relay image moved to Bun 1.4.3 (1.2.19's fetch-based `node:https` ignored `servername`).
+5. ✅ Log: `search/log/fetch.jsonl` (agent, wake, url, final_url, status, relay_status, content_type, bytes, redirects, raw, latency, blocked/error). Free, so not in the DB: `just report` has a "Web fetch" section, the wake page a "web fetches" stat.
+6. ✅ Prompt: two lines for every harness (claude `--system-prompt`, codex `model_instructions_file`, pi `--system-prompt`), built from the limits; Claude's own WebFetch stays off.
+7. ✅ Tests (`test/webfetch.test.ts`) and preflight check 10 (public page as text and raw; metadata, loopback, dashboard port, proxy, the relay itself, a private and an IPv4-mapped address, `file:` all blocked; a fetch-only token can't search; direct `curl` still refused).
+
+Open: no per-wake fetch count or rate limit (fetches are free; the log shows abuse after the fact). Data can leave in URLs (query strings), as through the GitHub outlet. IPv6-only hosts are fetched only if the relay's network routes IPv6 (IPv4 is preferred).
 
 ## Not verified yet
 

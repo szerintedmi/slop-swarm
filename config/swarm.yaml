@@ -38,6 +38,13 @@ github:
   org: slop-swarm
   user: slop-swarm-agents
 
+# Agents' `webfetch <url>` (any harness): GET-only downloads of public URLs, done by the run's relay; agents never
+# connect out themselves and the allowlist above stays as it is. Remove this section to turn it off.
+webfetch:
+  max_mb: 20                # larger downloads are refused
+  timeout_s: 30             # per fetch, redirects included
+  max_redirects: 5          # each hop is re-checked (public address, port 80/443)
+
 forge:                      # the run's Forgejo, the agents' shared world (plan §4.5)
   image: codeberg.org/forgejo/forgejo:16.0.4-rootless
   port: 3300                # your view: http://127.0.0.1:3300 (FORGE_PORT=… overrides)
