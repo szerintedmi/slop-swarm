@@ -48,7 +48,8 @@ search:
     included_results: 10
     per_extra_result_usd: 0.001   # $1 / 1K results above 10
     per_page_usd:             # $1 / 1K pages per content type
-      highlights: 0.001       # The pricing page names this price for /contents and summaries only; whether
-      text: 0.001             # /search bills highlights is not stated. Counted (worst case) until
-      summary: 0.001          # costDollars shows otherwise.
+      highlights: 0           # Not billed per page on /search: a live search with highlights for 2 results
+                              # cost $0.007 (costDollars.total), not $0.009 (checked 2026-10-11, live costDollars).
+      text: 0.001             # text and summary: the pricing page's /contents price, unverified on /search
+      summary: 0.001          # (the relay doesn't ask for them).
     # Source: exa.ai/pricing and exa.ai/docs/reference/search, checked 2026-10-11.

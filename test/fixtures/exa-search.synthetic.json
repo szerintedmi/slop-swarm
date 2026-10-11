@@ -32,8 +32,7 @@
   ],
   "searchTime": 412.7,
   "costDollars": {
-    "total": 0.009,
-    "search": { "neural": 0.007 },
-    "contents": { "highlights": 0.002 }
+    "total": 0.007,
+    "search": { "neural": 0.007 }
   }
 }

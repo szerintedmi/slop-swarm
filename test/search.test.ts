@@ -162,7 +162,7 @@ describe("relay handler", () => {
       type: "auto",
       results: 3,
       pages: { highlights: 2 },
-      exa_cost_usd: 0.009,
+      exa_cost_usd: 0.007,
       status: 200,
       error: null,
     });
@@ -210,10 +210,11 @@ describe("relay handler", () => {
 describe("search cost", () => {
   const e = (results: number, pages: Record<string, number>, type = "auto") => ({ model: SEARCH_MODEL, type, results, pages });
   test("Exa formula: base up to 10 results, extra results, pages per content type", () => {
-    expect(searchCost(e(8, { highlights: 8 }), pricing)).toBeCloseTo(0.007 + 0.008, 10);
+    // Highlights are free on /search (live costDollars, 2026-10-11); text and summary pages cost $0.001 each.
+    expect(searchCost(e(8, { highlights: 8 }), pricing)).toBeCloseTo(0.007, 10);
     expect(searchCost(e(0, {}), pricing)).toBeCloseTo(0.007, 10);
-    expect(searchCost(e(15, { highlights: 15 }), pricing)).toBeCloseTo(0.007 + 5 * 0.001 + 15 * 0.001, 10);
-    expect(searchCost(e(2, { highlights: 2, text: 1, unknown: 9 }), pricing)).toBeCloseTo(0.007 + 0.003, 10);
+    expect(searchCost(e(15, { highlights: 15 }), pricing)).toBeCloseTo(0.007 + 5 * 0.001, 10);
+    expect(searchCost(e(2, { highlights: 2, text: 1, summary: 2, unknown: 9 }), pricing)).toBeCloseTo(0.007 + 0.003, 10);
     // The fixture: our formula matches Exa's own costDollars.total.
     expect(searchCost(e(3, { highlights: 2 }), pricing)).toBeCloseTo(JSON.parse(EXA).costDollars.total, 10);
     expect(() => searchCost(e(1, {}, "deep"), pricing)).toThrow(PricingError);
@@ -231,12 +232,12 @@ describe("search cost", () => {
   test("search rows: billed searches only, no tokens, one web search each", () => {
     const entry = (over: Partial<SearchLogEntry>): SearchLogEntry => ({
       id: "x", ts: "2026-10-11T10:00:00.000Z", agent: "wren", wake: 1, query: "q", params: {}, type: "auto",
-      results: 8, pages: { highlights: 8 }, exa_cost_usd: 0.015, latency_ms: 500, status: 200, error: null, ...over,
+      results: 8, pages: { highlights: 8 }, exa_cost_usd: 0.007, latency_ms: 500, status: 200, error: null, ...over,
     });
     const { rows, total } = searchRows(pricing, [entry({ id: "a" }), entry({ id: "b", status: 503, error: "no EXA_API_KEY", results: 0, pages: {} })]);
     expect(rows).toHaveLength(1);
     expect(rows[0]!.u).toMatchObject({ requestId: "search:a", model: SEARCH_MODEL, freshInput: 0, output: 0, webSearches: 1 });
-    expect(total).toBeCloseTo(0.015, 10);
+    expect(total).toBeCloseTo(0.007, 10);
   });
 });
 
@@ -335,7 +336,7 @@ describe.skipIf(!hasTools)("websearch CLI", () => {
   });
 });
 
-// A real Exa call, only when a key is in the environment (it costs ~$0.015).
+// A real Exa call, only when a key is in the environment (it costs ~$0.007).
 describe.skipIf(!process.env.EXA_API_KEY?.trim())("live Exa", () => {
   test("one search through the relay handler", async () => {
     const d = scratch();
@@ -349,6 +350,8 @@ describe.skipIf(!process.env.EXA_API_KEY?.trim())("live Exa", () => {
     const ours = searchCost({ model: SEARCH_MODEL, type: e!.type, results: e!.results, pages: e!.pages }, pricing);
     console.log(`live Exa: ${e!.results} results, computed $${ours.toFixed(4)}, Exa $${e!.exa_cost_usd}`);
     expect(e!.exa_cost_usd).not.toBeNull();
+    // Our formula (config/pricing.yaml) matches what Exa charged.
+    expect(Math.abs(ours - e!.exa_cost_usd!)).toBeLessThan(0.0005);
   }, 30_000);
 });
 
@@ -424,9 +427,9 @@ describe("searches billed to the wake", () => {
     const rows = reqs(w.id);
     const s = rows.find((r) => r.model === SEARCH_MODEL)!;
     expect(s).toMatchObject({ request_id: "search:b5947044c4b78efa9552a7c89b306d95", web_searches: 1, prompt_tokens: 0, output: 0 });
-    expect(s.cost_usd).toBeCloseTo(0.009, 10);
+    expect(s.cost_usd).toBeCloseTo(0.007, 10);
     // Same model usage as bramble's wake, plus the search.
-    expect(w.cost_usd).toBeCloseTo(b.cost_usd + 0.009, 10);
+    expect(w.cost_usd).toBeCloseTo(b.cost_usd + 0.007, 10);
     const spent = db.query<AgentRow, [string]>("SELECT * FROM agents WHERE name = ?").get("wren")!.spent_usd;
     expect(spent).toBeCloseTo(w.cost_usd, 10);
 
@@ -453,7 +456,7 @@ describe("searches billed to the wake", () => {
     const report = renderReport(db, runId, T0 + 60_000);
     expect(report).toContain("API requests: 6, relay web searches: 1");
     expect(report).toContain("## Web search (relay)");
-    expect(report).toContain("1 search(es) billed, $0.0090 computed");
-    expect(report).toContain("Exa reported $0.0090 for 1 of them");
+    expect(report).toContain("1 search(es) billed, $0.0070 computed");
+    expect(report).toContain("Exa reported $0.0070 for 1 of them");
   });
 });

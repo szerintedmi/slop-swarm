@@ -108,6 +108,9 @@ export function mergePricing(baseYaml: string, models: string[], catalogue: Cata
   const stamp = fetchedAt.toISOString().replace(/\.\d+Z$/, "Z");
   const block = added
     .map(([key, e]) => {
+      // The catalogue gives the list price. The provider a preset routes to may charge less (seen: GLM 5.3 Flash
+      // via StreamLake charged ~55% below list), so our computed cost is an upper bound; the per-request
+      // OpenRouter charge (requests.vendor_cost_usd, in the report and dashboard) is the cross-check.
       const lines = [``, `  ${JSON.stringify(key)}:`, `    # list price from ${OPENROUTER_API}/models, fetched ${stamp}`];
       for (const [k, v] of Object.entries(e)) lines.push(`    ${k}: ${JSON.stringify(v)}`);
       return lines.join("\n");
