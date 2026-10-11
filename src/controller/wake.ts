@@ -227,7 +227,8 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     const swarmRemaining = Math.max(0, deps.swarmBudgetUsd - repo.swarmSpent());
     const limit = wakeLimit(cfg.budgets.perWake.maxUsd, agentRemaining(a), swarmRemaining);
 
-    writeSelf(dirs.self, a.budget_usd, previous, deps.pricingYaml);
+    // The agent sees only its own models' prices; costing above keeps the full table.
+    writeSelf(dirs.self, a.budget_usd, previous, deps.pricingYaml, repo.agentModels(a.name));
 
     if (a.runtime === "codex" && !existsSync(join(dirs.runtime, "auth.json"))) {
       if (!existsSync(deps.codexAuthPath)) throw new Error(`codex auth missing: ${deps.codexAuthPath}`);

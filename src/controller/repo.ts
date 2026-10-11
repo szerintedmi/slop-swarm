@@ -55,6 +55,14 @@ export class Repo {
       .query<WakeRow, [string, string]>("SELECT * FROM wakes WHERE run_id = ? AND agent = ? AND ended_at IS NOT NULL ORDER BY seq")
       .all(this.runId, agent);
   }
+  /** The agent's own models: its configured model plus every model its past requests were billed for. */
+  agentModels(agent: string): string[] {
+    const billed = this.db
+      .query<{ model: string }, [string, string]>("SELECT DISTINCT model FROM requests WHERE run_id = ? AND agent = ? ORDER BY model")
+      .all(this.runId, agent)
+      .map((r) => r.model);
+    return [...new Set([this.agent(agent).model, ...billed])];
+  }
   openWakes(): WakeRow[] {
     return this.db.query<WakeRow, [string]>("SELECT * FROM wakes WHERE run_id = ? AND ended_at IS NULL").all(this.runId);
   }

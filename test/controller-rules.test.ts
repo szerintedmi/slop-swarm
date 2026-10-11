@@ -4,7 +4,9 @@ import { loadSwarm, parseSwarm, swarmFromSnapshot } from "../src/config.ts";
 import { isDepleted, overLimit, wakeLimit } from "../src/controller/budget.ts";
 import { fillSeed, humanDuration, makeRunId, wakeNote } from "../src/controller/run.ts";
 import { messagePull, parseNextWake, pickDue, planNextWake } from "../src/controller/scheduler.ts";
+import { pricingForModels } from "../src/controller/self-writer.ts";
 import { wakeStopAt } from "../src/controller/wake.ts";
+import { parsePricing } from "../src/pricing/index.ts";
 
 const MIN = 60_000;
 const sched = { maxSleepMs: 15 * MIN, maxConcurrentWakes: 3 };
@@ -172,5 +174,36 @@ describe("prompt + status", () => {
     expect(wakeStopAt(55 * MIN, 10 * MIN, end, MIN)).toEqual({ at: 61 * MIN, atWorldEnd: true });
     expect(wakeStopAt(51 * MIN, 10 * MIN, end, MIN)).toEqual({ at: 61 * MIN, atWorldEnd: false }); // tie: the timeout
     expect(wakeStopAt(59 * MIN, 10 * MIN, end, 0)).toEqual({ at: 60 * MIN, atWorldEnd: true });
+  });
+});
+
+describe("pricingForModels (/self/pricing.yaml)", () => {
+  const full = readFileSync("config/pricing.yaml", "utf8");
+  const header = full.slice(0, full.indexOf("models:"));
+  const names = (y: string) => Object.keys(parsePricing(y).models).sort();
+
+  test("an agent on one model sees only that model, with the header and its comments", () => {
+    const y = pricingForModels(full, ["gpt-6-luna"]);
+    expect(names(y)).toEqual(["gpt-6-luna"]);
+    expect(y).toStartWith(header);
+    expect(y).toContain("# Source: developers.openai.com");
+    expect(y).not.toContain("claude-haiku-5-5");
+    expect(parsePricing(y).models["gpt-6-luna"]).toEqual(parsePricing(full).models["gpt-6-luna"]!);
+  });
+
+  test("extra billed models are included; unknown models are omitted", () => {
+    expect(names(pricingForModels(full, ["claude-haiku-5-5", "gpt-6-luna", "mystery"]))).toEqual(["claude-haiku-5-5", "gpt-6-luna"]);
+    // No known model at all (can't happen for a real agent: its configured model is costed) -> empty map.
+    const none = pricingForModels(full, ["mystery"]);
+    expect(Bun.YAML.parse(none)).toEqual({ models: {} });
+    expect(none).toStartWith(header);
+  });
+
+  test("falls back to re-emitted YAML (header kept) when the layout can't be filtered as text", () => {
+    const flow = "# units: USD/Mtok\nmodels: {a: {per_mtok: {input: 1, output: 2, cache_read: 0.1}}, b: {per_mtok: {input: 3, output: 4, cache_read: 0.3}}}\n";
+    const y = pricingForModels(flow, ["b"]);
+    expect(y).toStartWith("# units: USD/Mtok\n");
+    expect(names(y)).toEqual(["b"]);
+    expect(parsePricing(y).models.b!.perMtok.output).toBe(4);
   });
 });

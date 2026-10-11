@@ -61,6 +61,6 @@ Live pages refresh their SvelteKit data every five seconds. Refresh pauses while
 ## Pointers
 
 - Original plan and rationale (no longer maintained): [docs/plans/2026-10-10-tiny-society-token-probe.md](docs/plans/2026-10-10-tiny-society-token-probe.md). Open plans: `docs/plans/`; finished ones: `docs/plans/_archive/`
-- Config: `config/smoke.yaml`, `config/swarm.yaml` (the 1-hour run), agents in `config/agents/`, prices in `config/pricing.yaml`, seed prompt in `config/seed.md`
+- Config: `config/smoke.yaml`, `config/swarm.yaml` (the 1-hour run), agents in `config/agents/`, prices in `config/pricing.yaml` (each agent's `/self/pricing.yaml` holds only its own models: configured plus any it was billed for), seed prompt in `config/seed.md`
 - Data (gitignored): `data/swarm.db`, `data/runs/<run>/`, or wherever `SLOPSWARM_DATA_DIR` points
 - Findings: `docs/findings/`

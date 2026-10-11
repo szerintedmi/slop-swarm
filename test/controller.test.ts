@@ -9,6 +9,7 @@ import { createRun } from "../src/controller/run.ts";
 import type { ProcessHandle } from "../src/controller/wake.ts";
 import { agentDirs, enqueueControl, getRun, openDb, type AgentRow, type EventRow, type ExtensionRow, type RequestRow, type WakeRow } from "../src/db/index.ts";
 import { forgeHost, type ForgeApi } from "../src/forge.ts";
+import { parsePricing } from "../src/pricing/index.ts";
 import { renderReport } from "../src/report.ts";
 
 const dataDir = mkdtempSync(join(tmpdir(), "slopswarm-test-"));
@@ -164,7 +165,10 @@ describe("controller", () => {
     // /self was written and is consistent.
     const self = agentDirs(h.runId, "bramble").self;
     expect(existsSync(join(self, "STATUS.md"))).toBe(false);
-    expect(readFileSync(join(self, "pricing.yaml"), "utf8")).toContain("claude-haiku-5-5");
+    const selfPricing = readFileSync(join(self, "pricing.yaml"), "utf8");
+    expect(selfPricing).toContain("claude-haiku-5-5");
+    expect(selfPricing).not.toContain("gpt-6-luna"); // only its own model's prices
+    expect(selfPricing).toStartWith("# API-equivalent list prices");
 
     // Thistle was already due (initial, waiting for the slot), so the mention moves nothing.
     await h.ctl.pollForge();
@@ -225,6 +229,27 @@ describe("controller", () => {
     expect(report).toContain("## Totals");
     expect(report).toContain("Sleeping agents pulled by the poller: 1");
     expect(report).toContain("Cross-check on 2 wake(s)");
+  });
+
+  test("/self/pricing.yaml lists the agent's own model plus models it was billed for", async () => {
+    const h = harness(config(), () => FIXTURE);
+    h.ctl.repo.updateAgent("bramble", { status: "paused" });
+    // An earlier wake of thistle's billed an extra model, and one the pricing table doesn't know.
+    const wid = h.ctl.repo.startWake({ agent: "thistle", seq: 0, trigger: "initial", started_at: T0 - MIN, slept_ms: null, resumed: 0, msgs_in: 0, raw_log_path: null, container_name: null });
+    h.ctl.repo.updateWake(wid, { ended_at: T0 - MIN / 2 });
+    const ins = h.db.query(
+      `INSERT INTO requests (wake_id, run_id, agent, seq, request_id, model, fresh_input, cache_read, cache_write_5m, cache_write_1h, output, reasoning, web_searches, prompt_tokens, tier, cost_usd)
+       VALUES (?, ?, 'thistle', ?, ?, ?, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)`,
+    );
+    ins.run(wid, h.runId, 1, "unattributed:gpt-6-luna", "gpt-6-luna");
+    ins.run(wid, h.runId, 2, "r2", "mystery-model");
+    expect(h.ctl.repo.agentModels("thistle")).toEqual(["claude-haiku-5-5", "gpt-6-luna", "mystery-model"]);
+    h.ctl.tick();
+    await h.ctl.whenIdle();
+    const pricing = readFileSync(join(agentDirs(h.runId, "thistle").self, "pricing.yaml"), "utf8");
+    expect(Object.keys(parsePricing(pricing).models).sort()).toEqual(["claude-haiku-5-5", "gpt-6-luna"]);
+    // The controller still costs with the full run table.
+    expect(Object.keys(parsePricing(getRun(h.db, h.runId)!.pricing_yaml).models)).toContain("gpt-6-luna");
   });
 
   test("notifications that arrive during a wake pull the next one, unless marked read", async () => {

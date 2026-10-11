@@ -5,7 +5,7 @@ Token-cost probe for a small society of CLI agents. The original spec, `docs/pla
 - **Stack:** Bun + TypeScript for the controller; Svelte 5 / SvelteKit for the dashboard, compiled with Vite (also running on Bun). Dashboard startup automatically builds when sources change; `just ui-build` forces a build and `just ui-dev` starts read-only HMR. `just` is the entry point; every recipe calls `src/cli.ts`.
 - **Verify:** run `just test` and `just typecheck` before you finish. `just preflight` needs Docker and the secrets.
 - **Map:**
-  - `src/controller/`: scheduler, wake, notification poller, budget and `/self` writer. It is the only DB writer; the CLI and dashboard only enqueue into `controls`.
+  - `src/controller/`: scheduler, wake, notification poller, budget and `/self` writer (`/self/pricing.yaml` is the run's price table cut to the agent's own models; costing uses the full table). It is the only DB writer; the CLI and dashboard only enqueue into `controls`.
   - `src/runtimes/`: one adapter per CLI. Fixture-tested in `test/fixtures/`.
   - `src/pricing/`: per-request USD from `config/pricing.yaml`.
   - `src/docker.ts`, `src/proxy.ts`, `docker/`: the container and egress boundary.
