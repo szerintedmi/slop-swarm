@@ -7,7 +7,7 @@ import { agentDirs, type WakeRow } from "../db/index.ts";
 import type { AgentConfig } from "../config.ts";
 import { dockerProcessEnv, dockerRunArgs, MOUNTS, type ContainerSpec } from "../docker.ts";
 import { forgeEnv, forgeHost, forgeUrl, type ForgeApi } from "../forge.ts";
-import { githubEnv, writeGithubLogin } from "../github.ts";
+import { GITHUB_TOKEN_ENV, githubEnv, githubTokenFromEnv, writeGithubLogin } from "../github.ts";
 import { generationCosts, type VendorCost } from "../openrouter.ts";
 import { computeCost, type PricingTable } from "../pricing/index.ts";
 import { getAdapter } from "../harnesses/index.ts";
@@ -45,8 +45,8 @@ export interface WakeDeps {
   image: string;
   /** Path of the Codex auth file copied into a codex agent's runtime dir if missing. */
   codexAuthPath: string;
-  /** Path of the shared GitHub token (github.ts); read each wake when the run has a GitHub outlet. */
-  githubTokenPath: string;
+  /** The agents' shared GitHub token (github.ts, from .env); read each wake when the run has a GitHub outlet. Injectable for tests. */
+  githubToken?: () => string | undefined;
   /** The run's forge: unread notification counts (plan §4.5). */
   forge: ForgeApi;
   /** Start `docker run …` with `env` as its environment; injectable for tests. stderr goes to `stderrPath`. */
@@ -257,8 +257,9 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     }
 
     if (cfg.github) {
-      if (!existsSync(deps.githubTokenPath)) throw new Error(`github token missing: ${deps.githubTokenPath}`);
-      writeGithubLogin(dirs.runtime, cfg.github.user, readFileSync(deps.githubTokenPath, "utf8").trim());
+      const token = (deps.githubToken ?? githubTokenFromEnv)();
+      if (!token) throw new Error(`github token missing: ${GITHUB_TOKEN_ENV} is not set in .env`);
+      writeGithubLogin(dirs.runtime, cfg.github.user, token);
     }
 
     if (relay) issueSearchToken(relay, dirs.runtime, a.name, wakeId, { search: searchRelay });

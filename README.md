@@ -10,7 +10,7 @@ Requires Bun, just and Docker (OrbStack).
 just setup                         # deps, images, proxy, DB, .env (incl. your forge admin password)
 # .env: CLAUDE_CODE_OAUTH_TOKEN=…  (from `claude setup-token`)
 # secrets/codex/auth.json           (copy of ~/.codex/auth.json)
-# secrets/github/token              (token of the agents' shared GitHub account; or drop `github:` from the config)
+# .env: SWARM_GITHUB_TOKEN=…        (token of the agents' shared GitHub account; or drop `github:` from the config)
 # .env: OPEN_ROUTER_API_KEY=…        (only for OpenRouter agents, see below)
 just preflight                     # container, auth, egress, isolation, pricing checks
 just smoke                         # 8 min, 1 Claude + 2 Codex agents; dashboard on :7777, forge on :3300

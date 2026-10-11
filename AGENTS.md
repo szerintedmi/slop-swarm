@@ -11,7 +11,7 @@ Token-cost probe for a small society of CLI agents. The original spec, `docs/pla
   - `src/openrouter.ts`: OpenRouter catalogue (prices, pi's `models.json` entries) and the per-generation charged-cost cross-check. OpenRouter agents: `harness: pi`, `provider: openrouter`, `key_env` (default `OPEN_ROUTER_API_KEY`); keys go into containers by name only.
   - `src/docker.ts`, `src/proxy.ts`, `docker/`: the container and egress boundary.
   - `src/forge.ts`: the run's Forgejo (the agents' shared space): containers, accounts, agent logins, notification counts.
-  - `src/github.ts`: the agents' public outlet: one GitHub org and shared account, logged in per wake from `secrets/github/token`.
+  - `src/github.ts`: the agents' public outlet: one GitHub org and shared account, logged in per wake from `SWARM_GITHUB_TOKEN` in `.env` (never passed as container env).
   - `src/search.ts`, `docker/search/relay.ts`, `docker/websearch`: the web search relay (Exa) for agents with `search: relay`: one container per run on the internal + egress networks, per-wake tokens, `search/log/search.jsonl` billed to the wake as `exa-search` request rows. `EXA_API_KEY` reaches only the relay; api.exa.ai stays off the proxy allowlist. The same container serves web fetch when the config has `webfetch:` (then every wake gets a token; `search: false` tokens can only fetch).
   - `src/webfetch.ts`, `docker/search/webfetch.ts`, `docker/webfetch`: every agent's GET-only downloads of public URLs through the relay (`webfetch:` in the swarm config); the SSRF guard is in `docker/search/webfetch.ts`.
   - `src/world.ts`: a run's world time and effective swarm budget, extensions included (`just extend`).

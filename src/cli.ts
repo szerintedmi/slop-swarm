@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { loadSwarm, swarmFromSnapshot } from "./config.ts";
 import { CODEX_AUTH_PATH, Controller } from "./controller/index.ts";
-import { GITHUB_TOKEN_PATH } from "./github.ts";
+import { GITHUB_TOKEN_ENV, githubTokenFromEnv } from "./github.ts";
 import { createRun } from "./controller/run.ts";
 import { startDashboard } from "./dashboard/server.ts";
 import { buildDashboard } from "./dashboard/build.ts";
@@ -88,7 +88,7 @@ function assertSecrets(cfg: ReturnType<typeof loadSwarm>): void {
   if (cfg.agents.some((a) => a.harness === "codex") && !existsSync(CODEX_AUTH_PATH)) die(`codex agents need ${CODEX_AUTH_PATH} (copy ~/.codex/auth.json)`);
   for (const a of cfg.agents) if (a.keyEnv && !process.env[a.keyEnv]?.trim()) die(`${a.name}: ${a.keyEnv} is not set in .env (its OpenRouter key)`);
   if (!forgeAdminFromEnv()) die("FORGE_ADMIN_PASSWORD is not set in .env (`just setup` generates one)");
-  if (cfg.github && !existsSync(GITHUB_TOKEN_PATH)) die(`the github outlet needs ${GITHUB_TOKEN_PATH} (a token for ${cfg.github.user}; or remove github: from the config)`);
+  if (cfg.github && !githubTokenFromEnv()) die(`the github outlet needs ${GITHUB_TOKEN_ENV} in .env (a token for ${cfg.github.user}; or remove github: from the config)`);
 }
 
 function forgePortOf(cfg: ReturnType<typeof loadSwarm>): number {

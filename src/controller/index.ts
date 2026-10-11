@@ -7,7 +7,6 @@ import type { SwarmConfig } from "../config.ts";
 import { agentDirs, getRun, type RunRow } from "../db/index.ts";
 import { dockerKillLabelled } from "../docker.ts";
 import type { ForgeApi } from "../forge.ts";
-import { GITHUB_TOKEN_PATH } from "../github.ts";
 import { AGENT_IMAGE } from "../proxy.ts";
 import { parsePricing, type PricingTable } from "../pricing/index.ts";
 import { getAdapter } from "../harnesses/index.ts";
@@ -70,7 +69,6 @@ export class Controller {
       swarmBudgetUsd: this.swarmUsd,
       image: AGENT_IMAGE,
       codexAuthPath: CODEX_AUTH_PATH,
-      githubTokenPath: GITHUB_TOKEN_PATH,
       forge: this.opts.forge,
       now: this.now,
       ...this.opts.wakeDeps,
