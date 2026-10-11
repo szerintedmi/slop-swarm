@@ -34,6 +34,20 @@ export interface PricingModel {
 
 export interface PricingTable {
   models: Record<string, PricingModel>;
+  /** Web search through the relay (src/search.ts), by pseudo-model name (e.g. `exa-search`). */
+  search: Record<string, SearchPricing>;
+}
+
+/** A search API priced per request (pricing.yaml `search:`), e.g. Exa. */
+export interface SearchPricing {
+  provider: string;
+  /** USD per request with up to `includedResults` results, by search type (`auto`, `fast`, …). */
+  perRequestUsd: Record<string, number>;
+  includedResults: number;
+  /** USD per result above `includedResults`. */
+  perExtraResultUsd: number;
+  /** USD per returned page, by content type (`highlights`, `text`, `summary`). */
+  perPageUsd: Record<string, number>;
 }
 
 export class PricingError extends Error {}
@@ -110,7 +124,40 @@ export function parsePricing(yamlText: string): PricingTable {
     };
   }
   if (Object.keys(models).length === 0) throw new PricingError("models: expected at least one model");
-  return { models };
+  return { models, search: parseSearchPricing(root.search) };
+}
+
+function parseSearchPricing(raw: unknown): Record<string, SearchPricing> {
+  const out: Record<string, SearchPricing> = {};
+  for (const [name, v] of Object.entries(rec(raw ?? {}, "search"))) {
+    const f = `search.${name}`;
+    const s = rec(v, f);
+    const prices = (x: unknown, field: string) => Object.fromEntries(Object.entries(rec(x ?? {}, field)).map(([k, p]) => [k, price(p, `${field}.${k}`)]));
+    const perRequestUsd = prices(s.per_request_usd, `${f}.per_request_usd`);
+    if (!Object.keys(perRequestUsd).length) throw new PricingError(`${f}.per_request_usd: expected a price per search type`);
+    out[name] = {
+      provider: typeof s.provider === "string" ? s.provider : "unknown",
+      perRequestUsd,
+      includedResults: price(s.included_results ?? 0, `${f}.included_results`),
+      perExtraResultUsd: price(s.per_extra_result_usd ?? 0, `${f}.per_extra_result_usd`),
+      perPageUsd: prices(s.per_page_usd, `${f}.per_page_usd`),
+    };
+  }
+  return out;
+}
+
+/**
+ * One search's cost from the provider's documented formula: the base price for its type, plus each result
+ * above the included ones, plus each returned page per content type. Unknown content types cost 0.
+ */
+export function searchCost(s: { model: string; type: string; results: number; pages: Record<string, number> }, p: PricingTable): number {
+  const m = p.search[s.model];
+  if (!m) throw new PricingError(`no search pricing for ${JSON.stringify(s.model)}`);
+  const base = m.perRequestUsd[s.type];
+  if (base === undefined) throw new PricingError(`no search pricing for ${s.model} type ${JSON.stringify(s.type)}`);
+  const extra = Math.max(0, s.results - m.includedResults) * m.perExtraResultUsd;
+  const pages = Object.entries(s.pages).reduce((sum, [k, n]) => sum + n * (m.perPageUsd[k] ?? 0), 0);
+  return base + extra + pages;
 }
 
 export function loadPricing(path: string): PricingTable {

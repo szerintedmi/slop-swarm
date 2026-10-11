@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# websearch: web search through the run's search relay (src/search.ts). Installed in the agent image;
+# works from any runtime. The relay URL and the wake's token file come from the container env.
+usage() {
+  cat >&2 <<'USAGE'
+usage: websearch "query" [--n N] [--domain example.com]... [--since YYYY-MM-DD] [--news]
+  --n N        number of results (default 8, max 20; more than 10 costs extra)
+  --domain D   only results from this domain (repeatable)
+  --since D    only pages published on or after this date
+  --news       news articles only
+USAGE
+  exit 2
+}
+
+query="" n="" since="" category=""
+domains=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --n) [ $# -ge 2 ] || usage; n="$2"; shift 2 ;;
+    --n=*) n="${1#--n=}"; shift ;;
+    --domain) [ $# -ge 2 ] || usage; domains+=("$2"); shift 2 ;;
+    --domain=*) domains+=("${1#--domain=}"); shift ;;
+    --since) [ $# -ge 2 ] || usage; since="$2"; shift 2 ;;
+    --since=*) since="${1#--since=}"; shift ;;
+    --news) category="news"; shift ;;
+    -h|--help) usage ;;
+    --) shift; query="${query:+$query }$*"; break ;;
+    -*) echo "websearch: unknown option $1" >&2; usage ;;
+    *) query="${query:+$query }$1"; shift ;;
+  esac
+done
+[ -n "$query" ] || usage
+if [ -n "$n" ] && ! [[ "$n" =~ ^[0-9]+$ ]]; then echo "websearch: --n needs a number" >&2; exit 2; fi
+if [ -n "$since" ] && ! [[ "$since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then echo "websearch: --since needs YYYY-MM-DD" >&2; exit 2; fi
+
+url="${SLOPSWARM_SEARCH_URL:-}"
+token_file="${SLOPSWARM_SEARCH_TOKEN_FILE:-/runtime/search/token}"
+if [ -z "$url" ] || [ ! -r "$token_file" ]; then
+  echo "websearch: web search is not available in this wake" >&2
+  exit 3
+fi
+
+body=$(jq -cn --arg q "$query" --arg n "$n" --arg since "$since" --arg cat "$category" '
+  {query: $q}
+  + (if $n != "" then {num_results: ($n | tonumber)} else {} end)
+  + (if $since != "" then {start_published_date: $since} else {} end)
+  + (if $cat != "" then {category: $cat} else {} end)
+  + (if ($ARGS.positional | length) > 0 then {include_domains: $ARGS.positional} else {} end)
+' --args ${domains[@]+"${domains[@]}"}) || { echo "websearch: could not build the request" >&2; exit 2; }
+
+tmp=$(mktemp) || exit 1
+trap 'rm -f "$tmp" "$tmp.err"' EXIT
+# The token goes in through a header file (process substitution), so it never shows in argv.
+code=$(curl -sS --noproxy '*' --max-time 45 -o "$tmp" -w '%{http_code}' \
+  -H @<(printf 'Authorization: Bearer %s\n' "$(tr -d '[:space:]' < "$token_file")") \
+  -H 'content-type: application/json' --data-binary "$body" "${url%/}/search" 2>"$tmp.err")
+if [ $? -ne 0 ]; then
+  echo "websearch: search relay unreachable ($(head -c 200 "$tmp.err"))" >&2
+  exit 1
+fi
+if [ "$code" = "200" ]; then
+  cat "$tmp"
+  exit 0
+fi
+echo "websearch: $(head -c 500 "$tmp")" >&2
+exit 1

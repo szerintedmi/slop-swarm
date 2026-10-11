@@ -199,6 +199,16 @@ describe("pricingForModels (/self/pricing.yaml)", () => {
     expect(none).toStartWith(header);
   });
 
+  test("relay search prices only for agents that may search; the section and its comments go otherwise", () => {
+    const without = pricingForModels(full, ["gpt-6-luna"]);
+    expect((Bun.YAML.parse(without) as Record<string, unknown>).search).toBeUndefined();
+    expect(without).not.toContain("Web search through the run's relay");
+    const withSearch = pricingForModels(full, ["gpt-6-luna", "exa-search"]);
+    expect(parsePricing(withSearch).search["exa-search"]).toEqual(parsePricing(full).search["exa-search"]!);
+    expect(withSearch).toContain("# Web search through the run's relay");
+    expect(names(withSearch)).toEqual(["gpt-6-luna"]);
+  });
+
   test("falls back to re-emitted YAML (header kept) when the layout can't be filtered as text", () => {
     const flow = "# units: USD/Mtok\nmodels: {a: {per_mtok: {input: 1, output: 2, cache_read: 0.1}}, b: {per_mtok: {input: 3, output: 4, cache_read: 0.3}}}\n";
     const y = pricingForModels(flow, ["b"]);

@@ -1,0 +1,39 @@
+{
+  "requestId": "b5947044c4b78efa9552a7c89b306d95",
+  "resolvedSearchType": "neural",
+  "results": [
+    {
+      "id": "https://example.org/blog/agent-costs",
+      "title": "What it costs to keep an agent running",
+      "url": "https://example.org/blog/agent-costs",
+      "publishedDate": "2026-09-28T00:00:00.000Z",
+      "author": "A. Writer",
+      "highlights": [
+        "Most of the cost of an idle agent is the first request of every wake:\n the system prompt and tool definitions are sent again.",
+        "Prompt caching cuts that by roughly 90% when wakes are less than five minutes apart."
+      ],
+      "highlightScores": [0.61, 0.47]
+    },
+    {
+      "id": "https://news.example.com/2026/10/search-apis",
+      "title": "Search APIs for LLM agents compared",
+      "url": "https://news.example.com/2026/10/search-apis",
+      "publishedDate": "2026-10-02",
+      "author": null,
+      "highlights": ["Per-request pricing ranges from $4 to $15 per thousand searches, depending on depth."],
+      "highlightScores": [0.55]
+    },
+    {
+      "id": "https://example.net/no-highlights",
+      "title": null,
+      "url": "https://example.net/no-highlights",
+      "highlights": []
+    }
+  ],
+  "searchTime": 412.7,
+  "costDollars": {
+    "total": 0.009,
+    "search": { "neural": 0.007 },
+    "contents": { "highlights": 0.002 }
+  }
+}

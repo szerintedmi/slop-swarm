@@ -1,6 +1,6 @@
 // Writes the agent-visible, read-only /self view (plan §4.1): usage.jsonl and pricing.yaml.
 // The per-wake status (time, budget, limits) is in the wake note instead (run.ts wakeNote).
-// pricing.yaml holds only the agent's own models (configured + billed), not the other agents'.
+// pricing.yaml holds only the agent's own models (configured + billed, plus relay search if it may search), not the other agents'.
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { WakeRow } from "../db/index.ts";
@@ -34,31 +34,41 @@ export function usageLine(w: WakeRow, budgetUsd: number, spentAfterUsd: number):
 
 const ENTRY = /^  (["']?)([^\s#"'][^:#"']*?)\1:\s*(#.*)?$/;
 
+/** Top-level pricing sections keyed by model (pricing.yaml `models:`, and `search:` for the relay's pseudo-models). */
+const SECTIONS = ["models", "search"] as const;
+
 /**
- * The run's pricing YAML cut down to the given models (unknown ones are just absent). Filters the
- * top-level `models:` entries as text so the header and per-model comments stay readable; if the
+ * The run's pricing YAML cut down to the given models (unknown ones are just absent). Filters the entries of
+ * the top-level `models:` and `search:` sections as text so the header and per-model comments stay readable; an
+ * empty `models:` becomes `models: {}`, an empty `search:` is dropped with the comment block above it. If the
  * result doesn't parse back to exactly the wanted entries, re-emits the YAML under the header instead.
  */
 export function pricingForModels(pricingYaml: string, models: Iterable<string>): string {
   const want = new Set(models);
-  const root = Bun.YAML.parse(pricingYaml) as { models?: Record<string, unknown> } & Record<string, unknown>;
-  const picked = Object.fromEntries(Object.entries(root.models ?? {}).filter(([k]) => want.has(k)));
+  const root = Bun.YAML.parse(pricingYaml) as Record<string, unknown>;
+  const expected: Record<string, unknown> = { ...root };
+  for (const sec of SECTIONS) {
+    const v = root[sec];
+    if (sec !== "models" && v === undefined) continue;
+    const picked = Object.fromEntries(Object.entries((v ?? {}) as Record<string, unknown>).filter(([k]) => want.has(k)));
+    if (sec === "models" || Object.keys(picked).length) expected[sec] = picked;
+    else delete expected[sec];
+  }
 
   const out: string[] = [];
-  let state: "before" | "in" | "after" = "before";
+  let section: (typeof SECTIONS)[number] | null = null;
   let key: string | null = null;
-  let modelsLine = -1;
+  let headerAt = -1;
+  let commentsAt = -1;
+  const close = () => {
+    if (!section) return;
+    if (!(section in expected)) out.splice(commentsAt); // empty optional section: drop it and its comments
+    else if (Object.keys(expected[section] as object).length === 0) out[headerAt] = `${section}: {}`;
+    section = null;
+  };
   for (const line of pricingYaml.split("\n")) {
-    if (state === "before") {
-      if (/^models:\s*(#.*)?$/.test(line)) {
-        state = "in";
-        modelsLine = out.length;
-      }
-      out.push(line);
-      continue;
-    }
-    if (state === "in") {
-      if (/^[^\s#]/.test(line)) state = "after";
+    if (section) {
+      if (/^[^\s#]/.test(line)) close();
       else {
         const m = ENTRY.exec(line);
         if (m) key = m[2]!;
@@ -66,19 +76,29 @@ export function pricingForModels(pricingYaml: string, models: Iterable<string>):
         continue;
       }
     }
+    const h = /^(\w+):\s*(#.*)?$/.exec(line);
+    const sec = SECTIONS.find((x) => x === h?.[1]);
+    if (sec) {
+      section = sec;
+      key = null;
+      // The comment lines right above the header belong to it.
+      commentsAt = out.length;
+      while (commentsAt > 0 && /^#/.test(out[commentsAt - 1]!)) commentsAt--;
+      headerAt = out.length;
+    }
     out.push(line);
   }
-  if (modelsLine >= 0 && Object.keys(picked).length === 0) out[modelsLine] = "models: {}";
+  close();
   const text = out.join("\n").replace(/\s*$/, "\n");
 
   try {
     const back = Bun.YAML.parse(text) as Record<string, unknown>;
-    if (JSON.stringify(back) === JSON.stringify({ ...root, models: picked })) return text;
+    if (JSON.stringify(back) === JSON.stringify(expected)) return text;
   } catch {
     // fall through to the re-emitted form
   }
   const header = pricingYaml.split("\n").filter((l, i, all) => all.slice(0, i + 1).every((x) => x.startsWith("#") || !x.trim()));
-  return `${header.join("\n")}\n${Bun.YAML.stringify({ ...root, models: picked }, null, 2)}\n`;
+  return `${header.join("\n")}\n${Bun.YAML.stringify(expected, null, 2)}\n`;
 }
 
 export function writeSelf(selfDir: string, budgetUsd: number, finishedWakes: WakeRow[], pricingYaml: string, models: Iterable<string>): void {

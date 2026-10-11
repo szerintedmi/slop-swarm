@@ -15,6 +15,8 @@ import { forgeAdminFromEnv, forgeDataDir, forgePort, FORWARDER_IMAGE, provisionA
 import { prepareOpenRouter } from "./openrouter.ts";
 import { AGENT_IMAGE, buildImages, ensureAgentImage, ensureProxy } from "./proxy.ts";
 import { runPreflight } from "./preflight.ts";
+import { parsePricing } from "./pricing/index.ts";
+import { checkSearchSetup, ensureSearchImage, searchHost, startSearch, stopSearch, usesRelay } from "./search.ts";
 import { renderReport } from "./report.ts";
 import { getAdapter } from "./runtimes/index.ts";
 import { writePiModels } from "./runtimes/pi.ts";
@@ -115,6 +117,25 @@ async function bringUpForge(runId: string, cfg: ReturnType<typeof loadSwarm>, po
   return { client, url: client.baseUrl };
 }
 
+/** Start the run's web search relay if any agent uses it (src/search.ts). Runs start without EXA_API_KEY (searches answer "unavailable"). */
+async function bringUpSearch(runId: string, cfg: ReturnType<typeof loadSwarm>): Promise<void> {
+  if (!cfg.agents.some(usesRelay)) return;
+  const fail = (msg: string): never => {
+    openDb().query("UPDATE runs SET status = 'stopped', stop_reason = 'search relay did not start', ended_at = ? WHERE id = ? AND status = 'running'").run(Date.now(), runId);
+    die(msg);
+  };
+  const check = checkSearchSetup(cfg, parsePricing(getRun(openDb(), runId)!.pricing_yaml));
+  if (check.error) fail(check.error);
+  for (const w of check.warnings) console.log(`warning: ${w}`);
+  try {
+    await startSearch({ runId, network: cfg.network.name });
+  } catch (e) {
+    await stopSearch(runId);
+    fail((e as Error).message);
+  }
+  console.log(`search relay: ${searchHost(runId)} (internal only)`);
+}
+
 /** Dashboard port: PORT env overrides the default 7777. */
 function dashPort(fallback: number): number {
   const p = Number(process.env.PORT ?? fallback);
@@ -146,6 +167,7 @@ function freePort(preferred: number, what: string): number {
 }
 
 async function runController(runId: string, cfg: ReturnType<typeof loadSwarm>, port: number, fport: number): Promise<void> {
+  await bringUpSearch(runId, cfg);
   const forge = await bringUpForge(runId, cfg, fport);
   const db = openDb();
   const controller = new Controller(db, runId, cfg, { forge: forge.client });
@@ -164,6 +186,7 @@ async function runController(runId: string, cfg: ReturnType<typeof loadSwarm>, p
   });
   process.on("SIGTERM", () => (quit ? quit() : controller.requestStop("SIGTERM")));
   await controller.loop();
+  await stopSearch(runId); // no wake can search any more
   // The run is over: no controller any more, but keep the dashboard and the forge up for browsing.
   releaseLock();
   console.log(`report: just report ${runId}`);
@@ -193,6 +216,7 @@ const commands: Record<string, (args: string[]) => Promise<void> | void> = {
     openDb().close();
     console.log(`database: ${DB_PATH}`);
     await buildImages();
+    await ensureSearchImage();
     const swarm = loadSwarm(join(ROOT, "config", "swarm.yaml"));
     for (const image of [swarm.forge.image, FORWARDER_IMAGE]) await Bun.spawn(["docker", "pull", "-q", image], { stdout: "inherit", stderr: "inherit" }).exited;
     await ensureProxy(swarm.network.allowlist);

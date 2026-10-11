@@ -1,4 +1,4 @@
-// `just preflight`: plan §11 checks 1–7. Each prints PASS / FAIL / SKIP with a one-line reason.
+// `just preflight`: plan §11 checks 1–7, and 9 (web search relay). Each prints PASS / FAIL / SKIP with a one-line reason.
 // Containers run with the same dockerRunArgs as real wakes; scratch dirs live under data/preflight/.
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -8,10 +8,11 @@ import { fillSeed, SYSTEM_PROMPT_FILE } from "./controller/run.ts";
 import { DATA_DIR } from "./db/index.ts";
 import { dockerProcessEnv, dockerRunArgs, imageInfo, MOUNTS, type ContainerSpec } from "./docker.ts";
 import { forgeUrl } from "./forge.ts";
-import { computeCost, loadPricing, parsePricing } from "./pricing/index.ts";
+import { computeCost, loadPricing, parsePricing, searchCost } from "./pricing/index.ts";
 import { generationCosts, prepareOpenRouter } from "./openrouter.ts";
 import { secretEnv } from "./controller/wake.ts";
 import { writePiModels } from "./runtimes/pi.ts";
+import { billed, issueSearchToken, readSearchLog, SEARCH_MODEL, searchDirs, searchEnv, searchHost, startSearch, stopSearch } from "./search.ts";
 import { AGENT_IMAGE, ensureAgentImage, ensureProxy } from "./proxy.ts";
 import { getAdapter } from "./runtimes/index.ts";
 import type { AgentEvent, RequestUsage, Runtime } from "./types.ts";
@@ -41,7 +42,7 @@ interface CliRun extends RunOutput {
 }
 
 class Preflight {
-  private readonly root = join(DATA_DIR, "preflight", new Date().toISOString().replace(/[:.]/g, "-"));
+  readonly root = join(DATA_DIR, "preflight", new Date().toISOString().replace(/[:.]/g, "-"));
   private seq = 0;
   /** Outputs shared between checks (1–3 feed 5–7). */
   claudeHi?: CliRun;
@@ -66,7 +67,7 @@ class Preflight {
   async container(
     agent: string,
     argv: string[],
-    { env = {}, passEnv = [] }: { env?: Record<string, string>; passEnv?: NonNullable<ContainerSpec["passEnv"]> } = {},
+    { env = {}, passEnv = [], noProxy = [] }: { env?: Record<string, string>; passEnv?: NonNullable<ContainerSpec["passEnv"]>; noProxy?: string[] } = {},
   ): Promise<RunOutput> {
     const dirs = this.agentDirs(agent);
     const name = `slopswarm-preflight-${agent}-${process.pid}-${++this.seq}`;
@@ -81,6 +82,7 @@ class Preflight {
       argv,
       network: this.cfg.network.name,
       proxy: this.cfg.network.proxy,
+      noProxy,
       limits: this.cfg.controller.container,
     });
     const p = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore", env: dockerProcessEnv({ passEnv }) });
@@ -467,6 +469,40 @@ async function check8(pf: Preflight): Promise<Result> {
   );
 }
 
+/**
+ * Web search relay (src/search.ts): a relay for a scratch run answers an agent container's `websearch` with a
+ * per-wake token, logs the search, and api.exa.ai stays unreachable from the agent. The Exa leg only with EXA_API_KEY.
+ */
+async function check9(pf: Preflight): Promise<Result> {
+  const runId = `preflight-${process.pid}`;
+  const dirs = searchDirs(join(pf.root, "search"));
+  try {
+    await startSearch({ runId, network: pf.cfg.network.name, dir: dirs.base });
+    const runtime = pf.agentDirs("searcher").runtime;
+    issueSearchToken(dirs, runtime, "searcher", 1);
+    const script =
+      'websearch "Exa search API pricing" --n 2 >/tmp/out 2>/tmp/err; echo "websearch=$?"; head -c 300 /tmp/out; head -c 300 /tmp/err; ' +
+      'curl -s -m 10 -o /dev/null https://api.exa.ai/search; echo "direct=$?"';
+    const out = await pf.container("searcher", ["bash", "-c", script], { env: searchEnv(runId), noProxy: [searchHost(runId)] });
+    const ws = /websearch=(\d+)/.exec(out.stdout)?.[1];
+    const direct = /direct=(\d+)/.exec(out.stdout)?.[1];
+    if (direct === undefined || direct === "0") return fail(`an agent container reached api.exa.ai directly (${lastLine(out.stdout)})`);
+    const logged = readSearchLog(dirs.logFile, 1);
+    if (!logged.length) return fail(`relay logged no search (websearch exit ${ws}: ${lastLine(out.stdout + out.stderr)})`);
+    const key = !!process.env.EXA_API_KEY?.trim();
+    if (!key) {
+      if (ws === "1" && /unavailable/.test(out.stdout)) return pass("relay reachable with a wake token, search logged, Exa unreachable from agents; Exa leg SKIPPED (no EXA_API_KEY)");
+      return fail(`expected "search unavailable" without a key (websearch exit ${ws}: ${lastLine(out.stdout)})`);
+    }
+    const e = logged.at(-1)!;
+    if (ws !== "0" || !billed(e)) return fail(`search failed: ${e.error ?? lastLine(out.stdout)}`);
+    const ours = searchCost({ model: SEARCH_MODEL, type: e.type, results: e.results, pages: e.pages }, loadPricing(pf.cfg.paths.pricing));
+    return pass(`${e.results} result(s) in ${e.latency_ms} ms; cost computed $${ours.toFixed(4)} vs Exa $${e.exa_cost_usd?.toFixed(4) ?? "?"}; Exa unreachable from agents`);
+  } finally {
+    await stopSearch(runId);
+  }
+}
+
 const CHECKS: [number, string, (pf: Preflight) => Promise<Result>][] = [
   [1, "Claude in a container (OAuth, --effort)", check1],
   [2, "Codex in a container (auth refresh rotation)", check2],
@@ -476,6 +512,7 @@ const CHECKS: [number, string, (pf: Preflight) => Promise<Result>][] = [
   [6, "Pricing cross-check (Claude ±1%)", check6],
   [7, "Lean harness overhead (stock vs lean system prompt)", check7],
   [8, "pi + OpenRouter in a container (key, preset, cost cross-check)", check8],
+  [9, "Web search relay (token, log, isolation; Exa with EXA_API_KEY)", check9],
 ];
 
 export async function runPreflight(opts: { swarmPath: string; only?: number[] }): Promise<boolean> {

@@ -16,6 +16,8 @@ export interface AgentConfig {
   provider: ModelProvider;
   /** OpenRouter agents: the env var (in .env) holding the API key. Never the key itself. */
   keyEnv?: string;
+  /** Web search: the runtime's own tool (`native`) or the run's relay via `websearch` (src/search.ts). */
+  search: "native" | "relay";
 }
 
 export interface SwarmConfig {
@@ -107,6 +109,8 @@ export function parseAgent(raw: unknown, defaultBudget: number, source: string):
     budgetUsd: a.budget_usd === undefined ? defaultBudget : num(a.budget_usd, `${source}.budget_usd`),
     provider,
     ...(keyEnv !== undefined ? { keyEnv } : {}),
+    // Claude and Codex keep their vendors' native search; pi has none and uses the relay.
+    search: oneOf(a.search ?? (runtime === "pi" ? "relay" : "native"), `${source}.search`, ["native", "relay"] as const),
   };
 }
 

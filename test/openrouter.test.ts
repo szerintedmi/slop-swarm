@@ -77,13 +77,14 @@ describe("catalogue -> pricing", () => {
   });
 
   test("mergePricing: text inserted into models:, other top-level sections verbatim, hand-written price wins", () => {
-    const withSearch = `${BASE.trimEnd()}\n\n# Search relay\nsearch:\n  exa: { per_request_usd: 0.005 }\n`;
-    const text = mergePricing(withSearch, [PRESET, "gpt-6-luna"], CATALOGUE, new Date("2026-10-11T00:00:00Z"));
-    expect(text.startsWith(BASE.trimEnd())).toBe(true);
-    expect(text.trimEnd().endsWith("search:\n  exa: { per_request_usd: 0.005 }")).toBe(true);
+    // config/pricing.yaml has a `search:` section after `models:`; it must stay verbatim and in place.
+    const searchAt = BASE.indexOf("\nsearch:");
+    expect(searchAt).toBeGreaterThan(0);
+    const text = mergePricing(BASE, [PRESET, "gpt-6-luna"], CATALOGUE, new Date("2026-10-11T00:00:00Z"));
+    expect(text.trimEnd().endsWith(BASE.slice(searchAt).trimEnd())).toBe(true);
     expect(text).toContain("# list price from https://openrouter.ai/api/v1/models, fetched 2026-10-11T00:00:00Z");
     const parsed = Bun.YAML.parse(text) as any;
-    expect(parsed.search).toEqual({ exa: { per_request_usd: 0.005 } });
+    expect(parsed.search).toEqual((Bun.YAML.parse(BASE) as any).search);
     expect(Object.keys(parsed.models)).toEqual(["claude-haiku-5-5", "gpt-6-luna", "z-ai/glm-5.3-flash"]);
     expect(parsePricing(text).models["gpt-6-luna"]!.provider).toBe("openai");
     expect(mergePricing(BASE, ["gpt-6-luna"], CATALOGUE, new Date())).toBe(BASE);

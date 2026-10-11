@@ -529,7 +529,10 @@ describe("controller", () => {
       (name) => ({ name, runtime: "pi", provider: "openrouter", model: "z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash", key_env: "TEST_OR_KEY", effort: "low" }),
     );
     const cfg = { ...parsed, paths: base.paths, snapshot: "# --- test\n" };
-    const pricingYaml = `${readFileSync(base.paths.pricing, "utf8")}\n  "z-ai/glm-5.3-flash":\n    provider: openrouter\n    per_mtok: { input: 0.15, output: 0.5, cache_read: 0.03 }\n`;
+    const pricingYaml = readFileSync(base.paths.pricing, "utf8").replace(
+      /^models:\n/m,
+      `models:\n  "z-ai/glm-5.3-flash":\n    provider: openrouter\n    per_mtok: { input: 0.15, output: 0.5, cache_read: 0.03 }\n`,
+    );
     process.env.TEST_OR_KEY = "sk-test-not-real";
     const looked: string[][] = [];
     const vendorCosts = async (ids: string[], key: string) => {

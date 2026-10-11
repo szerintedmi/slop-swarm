@@ -1,6 +1,7 @@
 // Markdown cost summary for a run (plan §12).
 import type { Database } from "bun:sqlite";
 import type { AgentRow, RequestRow, RunRow, WakeRow } from "./db/index.ts";
+import { billed, readSearchLog, runSearchDirs, SEARCH_MODEL } from "./search.ts";
 import { describeExtension, extensionsOf, swarmBudgetUsd, worldGaps, worldTime } from "./world.ts";
 
 export function quantile(xs: number[], q: number): number {
@@ -43,7 +44,10 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
   const allWakes = db.query<WakeRow, [string]>("SELECT * FROM wakes WHERE run_id = ? AND ended_at IS NOT NULL ORDER BY started_at").all(runId);
   // Wakes that never reached the model (auth/infra failures) would skew every cost statistic.
   const wakes = allWakes.filter((w) => w.requests > 0);
-  const requests = db.query<RequestRow, [string]>("SELECT * FROM requests WHERE run_id = ? ORDER BY wake_id, seq").all(runId);
+  const allRequests = db.query<RequestRow, [string]>("SELECT * FROM requests WHERE run_id = ? ORDER BY wake_id, seq").all(runId);
+  // Relay web searches are billed as request rows without tokens (src/search.ts); kept apart from model requests.
+  const requests = allRequests.filter((r) => r.model !== SEARCH_MODEL);
+  const searchRequests = allRequests.filter((r) => r.model === SEARCH_MODEL);
   const pulls = db.query<{ c: number }, [string]>("SELECT COUNT(*) AS c FROM events WHERE run_id = ? AND kind = 'lifecycle' AND name = 'forge_pull'").get(runId)!.c;
   // World time: the stretches while the run was stopped (before a resume or extension) don't count.
   const world = worldTime(db, run, now);
@@ -59,7 +63,7 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
   const wall = (world.segments.at(-1)!.end - run.started_at) / 3_600_000;
   out.push(`- Started ${new Date(run.started_at).toISOString()}, world time ${hours.toFixed(2)} h${gaps.length ? ` (${wall.toFixed(2)} h wall clock; stopped ${gaps.length} time(s) in between)` : ""}`);
   out.push(`- Seed sha256: \`${run.seed_sha256.slice(0, 16)}…\`, CLI versions: \`${run.cli_versions ?? "?"}\`, image: \`${run.image_digest ?? "?"}\``);
-  out.push(`- Wakes: ${allWakes.length} (${allWakes.length - wakes.length} without any API request, excluded below), API requests: ${requests.length}`, "");
+  out.push(`- Wakes: ${allWakes.length} (${allWakes.length - wakes.length} without any API request, excluded below), API requests: ${requests.length}${searchRequests.length ? `, relay web searches: ${searchRequests.length}` : ""}`, "");
 
   out.push("## Totals", "");
   out.push(
@@ -124,6 +128,26 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
       "",
       mdTable(["served by", "requests", "computed", "charged", "difference"], [...[...byProvider].map(([k, rs]) => row(k, rs)), row("all", vendor)]),
     );
+  }
+
+  const log = readSearchLog(runSearchDirs(runId).logFile);
+  if (searchRequests.length || log.length) {
+    out.push("## Web search (relay)", "");
+    const ours = searchRequests.reduce((s, r) => s + r.cost_usd, 0);
+    const billedIds = new Set(searchRequests.map((r) => r.request_id));
+    const matched = log.filter((e) => billedIds.has(`search:${e.id}`) && e.exa_cost_usd !== null);
+    const oursMatched = searchRequests.filter((r) => matched.some((e) => `search:${e.id}` === r.request_id)).reduce((s, r) => s + r.cost_usd, 0);
+    const theirs = matched.reduce((s, e) => s + e.exa_cost_usd!, 0);
+    const failed = log.filter((e) => !billed(e));
+    out.push(
+      `${searchRequests.length} search(es) billed, ${$(ours)} computed (in the wake costs above)` +
+        (matched.length ? `; Exa reported ${$(theirs)} for ${matched.length} of them (computed ${$(oursMatched)}, ${pct(oursMatched / theirs - 1)} difference)` : "") +
+        (failed.length ? `; ${failed.length} failed, not billed (${[...new Set(failed.map((e) => e.error?.split(":")[0] ?? "error"))].join(", ")})` : "") +
+        ".",
+      "",
+    );
+    const lat = log.filter(billed).map((e) => e.latency_ms);
+    if (lat.length) out.push(`Latency: median ${n(median(lat))} ms, p90 ${n(quantile(lat, 0.9))} ms.`, "");
   }
 
   out.push("## Per wake", "");
