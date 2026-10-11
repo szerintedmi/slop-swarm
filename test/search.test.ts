@@ -241,10 +241,19 @@ describe("search cost", () => {
 });
 
 describe("config and setup", () => {
-  test("search: native by default for claude/codex, relay on request", () => {
-    expect(parseAgent({ name: "a", harness: "claude", model: "m" }, 1, "x").search).toBe("native");
-    expect(parseAgent({ name: "a", harness: "codex", model: "m", search: "relay" }, 1, "x").search).toBe("relay");
-    expect(() => parseAgent({ name: "a", harness: "codex", model: "m", search: "exa" }, 1, "x")).toThrow("search");
+  test("search: native by default for claude/codex, relay on request; pi relay only", () => {
+    const parse = (o: object) => parseAgent({ name: "a", model: "m", ...o }, 1, "x");
+    const pi = { harness: "pi", provider: "openrouter" };
+    expect(parse({ harness: "claude" }).search).toBe("native");
+    expect(parse({ harness: "claude", search: "native" }).search).toBe("native");
+    expect(parse({ harness: "claude", search: "relay" }).search).toBe("relay");
+    expect(parse({ harness: "codex" }).search).toBe("native");
+    expect(parse({ harness: "codex", search: "native" }).search).toBe("native");
+    expect(parse({ harness: "codex", search: "relay" }).search).toBe("relay");
+    expect(parse(pi).search).toBe("relay");
+    expect(parse({ ...pi, search: "relay" }).search).toBe("relay");
+    expect(() => parse({ ...pi, search: "native" })).toThrow("x.search: pi has no native search tool; use search: relay");
+    expect(() => parse({ harness: "codex", search: "exa" })).toThrow("search");
   });
 
   test("start checks: pricing needed, missing key only warns", () => {
@@ -433,6 +442,9 @@ describe("searches billed to the wake", () => {
     expect(wa![wa!.indexOf("--system-prompt") + 1]).toContain('Web search: `websearch "query"`');
     expect(env(ba!, "SLOPSWARM_SEARCH_URL")).toBeUndefined();
     expect(ba![ba!.indexOf("--system-prompt") + 1]).not.toContain("websearch");
+    // The relay agent has Claude Code's own WebSearch tool turned off; the native one keeps it.
+    expect(wa![wa!.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit");
+    expect(ba![ba!.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit,WebSearch");
     expect(JSON.parse(readFileSync(dirs.tokensFile, "utf8"))).toEqual({});
 
     // The agent sees the search price in /self/pricing.yaml; the report shows searches and Exa's cross-check.

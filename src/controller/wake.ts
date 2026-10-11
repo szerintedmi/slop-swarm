@@ -286,6 +286,8 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       effort: a.effort as "low" | "medium" | "high",
       maxTurns: cfg.budgets.perWake.maxTurns,
       resumeSessionId: resumeId,
+      // On the relay the harness's own search tool is off, so the agent doesn't have both.
+      nativeSearch: relay === null,
     });
     const spec: ContainerSpec = {
       name: containerName,

@@ -93,6 +93,15 @@ describe("claude adapter", () => {
     expect(claude.buildCommand({ prompt: "hi", model: "m", effort: "medium", maxTurns: 5 })).not.toContain("--system-prompt");
   });
 
+  test("buildCommand: on the relay (nativeSearch false) WebSearch is off, lean or stock", () => {
+    const lean = claude.buildCommand({ prompt: "hi", model: "m", effort: "medium", maxTurns: 5, systemPrompt: { text: "s", file: "/x" }, nativeSearch: false });
+    expect(lean[lean.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit");
+    expect(lean).not.toContain("--disallowedTools");
+    const stock = claude.buildCommand({ prompt: "hi", model: "m", effort: "medium", maxTurns: 5, nativeSearch: false });
+    expect(stock[stock.indexOf("--disallowedTools") + 1]).toBe("WebSearch");
+    expect(claude.searchModes).toEqual(["native", "relay"]);
+  });
+
   test("buildCommand", () => {
     const argv = claude.buildCommand({ prompt: "hi", model: "claude-haiku-5-5", effort: "medium", maxTurns: 60 });
     expect(argv).toEqual([
@@ -231,6 +240,15 @@ describe("codex adapter", () => {
     }
   });
 
+  test("buildCommand: on the relay (nativeSearch false) Codex's web search is disabled, also on resume", () => {
+    for (const resumeSessionId of [undefined, "T1"]) {
+      const argv = codex.buildCommand({ prompt: "hi", model: "gpt-6-luna", effort: "medium", maxTurns: 60, resumeSessionId, nativeSearch: false });
+      expect(argv).toContain('web_search="disabled"');
+      expect(argv).not.toContain('web_search="live"');
+    }
+    expect(codex.searchModes).toEqual(["native", "relay"]);
+  });
+
   test("parses the say-hi stream and normalises input (input includes cached)", () => {
     const { events, streamed } = run(codex, lines("codex-hi.jsonl"), "gpt-6-luna");
     expect(events[0]).toEqual({ kind: "session", sessionId: "01a12507-767d-7fb1-bfb5-ede93d67f174" });
@@ -341,6 +359,7 @@ describe("pi adapter", () => {
     expect(resumed[resumed.indexOf("--session-id") + 1]).toBe(SID);
     expect(pi.containerEnv("/runtime")).toMatchObject({ PI_CODING_AGENT_DIR: "/runtime/pi", PI_OFFLINE: "1", PI_TELEMETRY: "0" });
     expect(pi.maxTurnsBy).toBe("turns");
+    expect(pi.searchModes).toEqual(["relay"]);
   });
 
   test("parses the real say-hi stream: one request priced as the slug before @ (input excludes cache)", async () => {

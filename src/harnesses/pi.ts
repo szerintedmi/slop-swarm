@@ -154,6 +154,8 @@ export const piAdapter: HarnessAdapter = {
   harness: "pi",
   // No max-turns flag: the controller counts `turn_start` events and stops the container.
   maxTurnsBy: "turns",
+  // pi has no search tool of its own.
+  searchModes: ["relay"],
 
   buildCommand(o: CommandOptions): string[] {
     const mount = "/runtime";

@@ -88,10 +88,13 @@ class ClaudeParser implements StreamParser {
 
 /** Tools for the lean harness. WebFetch is left out: it fetches client-side and the proxy blocks it. */
 export const LEAN_TOOLS = "Bash,Read,Write,Edit,WebSearch";
+/** The lean tools without Claude Code's own web search, for agents on the relay (`search: relay`). */
+export const LEAN_TOOLS_NO_SEARCH = LEAN_TOOLS.split(",").filter((t) => t !== "WebSearch").join(",");
 
 export const claudeAdapter: HarnessAdapter = {
   harness: "claude",
   reportedCostIsCumulative: true,
+  searchModes: ["native", "relay"],
 
   buildCommand(o: CommandOptions): string[] {
     return [
@@ -115,7 +118,8 @@ export const claudeAdapter: HarnessAdapter = {
       "--thinking-display",
       "summarized",
       // Lean harness: our seed replaces Claude Code's system prompt, and only these tools are exposed.
-      ...(o.systemPrompt ? ["--system-prompt", o.systemPrompt.text, "--tools", LEAN_TOOLS] : []),
+      ...(o.systemPrompt ? ["--system-prompt", o.systemPrompt.text, "--tools", o.nativeSearch === false ? LEAN_TOOLS_NO_SEARCH : LEAN_TOOLS] : []),
+      ...(!o.systemPrompt && o.nativeSearch === false ? ["--disallowedTools", "WebSearch"] : []),
       ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : []),
     ];
   },

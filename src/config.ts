@@ -1,7 +1,8 @@
 // YAML config loading + validation (plan §2, §5, §6).
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { HARNESSES, type Effort, type Harness } from "./types.ts";
+import { getAdapter } from "./harnesses/index.ts";
+import { HARNESSES, type Effort, type Harness, type SearchMode } from "./types.ts";
 
 export type ModelProvider = "native" | "openrouter";
 
@@ -17,7 +18,7 @@ export interface AgentConfig {
   /** OpenRouter agents: the env var (in .env) holding the API key. Never the key itself. */
   keyEnv?: string;
   /** Web search: the harness's own tool (`native`) or the run's relay via `websearch` (src/search.ts). */
-  search: "native" | "relay";
+  search: SearchMode;
 }
 
 export interface SwarmConfig {
@@ -111,9 +112,20 @@ export function parseAgent(raw: unknown, defaultBudget: number, source: string):
     budgetUsd: a.budget_usd === undefined ? defaultBudget : num(a.budget_usd, `${source}.budget_usd`),
     provider,
     ...(keyEnv !== undefined ? { keyEnv } : {}),
-    // Claude and Codex keep their vendors' native search; pi has none and uses the relay.
-    search: oneOf(a.search ?? (harness === "pi" ? "relay" : "native"), `${source}.search`, ["native", "relay"] as const),
+    search: parseSearch(a.search, harness, `${source}.search`),
   };
+}
+
+/**
+ * `search:` against what the harness supports (its adapter's `searchModes`; the first is the default).
+ * Claude and Codex default to their own search; with `relay` their own tool is turned off. pi has none.
+ */
+function parseSearch(v: unknown, harness: Harness, field: string): SearchMode {
+  const modes = getAdapter(harness).searchModes;
+  const mode = oneOf(v ?? modes[0], field, ["native", "relay"] as const);
+  if (!modes.includes(mode))
+    throw new ConfigError(`${field}: ${harness} has no ${mode === "native" ? "native search tool" : "relay support"}; use ${modes.map((m) => `search: ${m}`).join(" or ")}`);
+  return mode;
 }
 
 /** Validate an already-parsed swarm YAML. `loadAgent(name)` returns the parsed agent YAML. */

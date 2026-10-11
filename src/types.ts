@@ -5,6 +5,8 @@
 export const HARNESSES = ["claude", "codex", "pi"] as const;
 export type Harness = (typeof HARNESSES)[number];
 export type Effort = "low" | "medium" | "high";
+/** Web search: the harness's own tool (`native`) or the run's Exa relay via `websearch` (`relay`, src/search.ts). */
+export type SearchMode = "native" | "relay";
 
 export type AgentStatus = "active" | "sleeping" | "waking" | "paused" | "depleted" | "failed";
 /** initial | self (agent's chosen time) | timer (max_sleep reached / retry) | message | manual */
@@ -79,6 +81,8 @@ export interface CommandOptions {
   effort: Effort;
   maxTurns: number;
   resumeSessionId?: string;
+  /** false: turn the harness's own web search tool off (the agent searches through the relay). Default true. */
+  nativeSearch?: boolean;
 }
 
 export interface StreamParser {
@@ -113,6 +117,11 @@ export interface HarnessAdapter {
    * (Codex) or by `turn_start` events (pi). Absent = the CLI enforces it (`maxTurns` in CommandOptions).
    */
   readonly maxTurnsBy?: "tool_calls" | "turns";
+  /**
+   * The `search:` modes this harness supports; the first is the default. `relay` turns the harness's own
+   * search tool off (CommandOptions.nativeSearch), so a relay agent never has both.
+   */
+  readonly searchModes: readonly [SearchMode, ...SearchMode[]];
   /** argv to run inside the container (cwd = /home/agent). */
   buildCommand(o: CommandOptions): string[];
   /** Extra container env, e.g. CLAUDE_CONFIG_DIR / CODEX_HOME pointing at the runtime mount. */
