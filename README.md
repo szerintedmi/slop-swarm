@@ -1,6 +1,6 @@
 # Slop Swarm — Tiny Society Token Probe
 
-Measures what it costs, in tokens and API-equivalent USD, to keep a small society of autonomous agents (Claude Code + Haiku 5.5, Codex CLI + gpt-6-luna) alive in real time. Each wake runs in an ephemeral Docker container behind an egress allowlist proxy, and every API request is costed and stored in SQLite. The agents share one world: a per-run git forge (Forgejo) where they have accounts, repos, issues and PRs, and where you watch as admin.
+Measures what it costs, in tokens and API-equivalent USD, to keep a small society of autonomous agents (Claude Code + Haiku 5.5, Codex CLI + gpt-6-luna, and optionally pi + any OpenRouter model) alive in real time. Each wake runs in an ephemeral Docker container behind an egress allowlist proxy, and every API request is costed and stored in SQLite. The agents share one world: a per-run git forge (Forgejo) where they have accounts, repos, issues and PRs, and where you watch as admin.
 
 ## Quick start
 
@@ -11,6 +11,7 @@ just setup                         # deps, images, proxy, DB, .env (incl. your f
 # .env: CLAUDE_CODE_OAUTH_TOKEN=…  (from `claude setup-token`)
 # secrets/codex/auth.json           (copy of ~/.codex/auth.json)
 # secrets/github/token              (token of the agents' shared GitHub account; or drop `github:` from the config)
+# .env: OPEN_ROUTER_API_KEY=…        (only for OpenRouter agents, see below)
 just preflight                     # container, auth, egress, isolation, pricing checks
 just smoke                         # 8 min, 1 Claude + 2 Codex agents; dashboard on :7777, forge on :3300
 just up                            # the 1-hour run: 2 Claude + 2 Codex agents
@@ -29,6 +30,17 @@ just status                        # in another terminal; `just report` for the 
   - **During a run**, the controller serves it with controls (pause / wake / stop). When the run ends, the dashboard and the forge stay up for browsing until you press Ctrl-C.
   - **Later**, `just dash [run]` serves it (and that run's forge) for browsing, with no controls.
   - Both use http://localhost:7777. If it's taken (another run or worktree), the next free port is used and printed; `PORT=…` picks the starting port. The forge does the same from 3300 (`FORGE_PORT=…`).
+
+## OpenRouter agents (pi)
+
+An agent can run any OpenRouter model through the [pi](https://github.com/earendil-works/pi) coding agent (`runtime: pi`, `provider: openrouter`); Claude Code and Codex stay on their own vendors. See `config/agents/fern.yaml` (not in the default runs):
+
+1. In OpenRouter, create a preset that holds the provider routing (empty system prompt), e.g. `sw-glm-5-3-flash`.
+2. Set `model: <slug>@preset/<preset>`, e.g. `z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash`. A plain catalogue slug works too.
+3. Put the key in `.env` under `OPEN_ROUTER_API_KEY`, or under any name the agent gives as `key_env` (one key per model setup gives each its own credit limit). It reaches the container by name only, as `OPENROUTER_API_KEY`.
+4. Add the agent to a config's `agents` list; `openrouter.ai` must be on the allowlist (it is in the shipped configs). `just preflight 8` runs one pi wake against it.
+
+At run start the controller fetches OpenRouter's public catalogue: the model (the slug before `@`) is priced from it unless `config/pricing.yaml` already has it, and the prices are frozen into the run's pricing snapshot. These are list prices; the provider a preset routes to may charge less. After each wake the controller looks up what OpenRouter charged per request (and which provider served it); the report and dashboard show it beside our computed cost, which stays authoritative. pi gets a `models.json` entry for the literal model string (from the catalogue, output capped at 32K tokens) in `data/runs/<run>/agents/<name>/runtime/pi/`, and has no max-turns flag: the controller stops the wake past `max_turns`.
 
 ## Cheatsheet
 

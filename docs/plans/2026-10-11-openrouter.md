@@ -34,11 +34,15 @@ Done (pi 1.1.0).
 
 ## 2. OpenRouter wiring
 
-1. Agent config: `provider: openrouter` (default `native`), `key_env` (default `OPEN_ROUTER_API_KEY`). `runtime: pi` requires `provider: openrouter` for now. Validation: the env var is set at run start (name it in the error, never the value).
-2. Pricing: extend tiers to accept absolute per-field prices (OpenRouter `overrides[].min_prompt_tokens` + prices) next to today's multipliers. Map `prompt`→input, `completion`→output, `input_cache_read`→cache_read, `input_cache_write`→cache_write_5m, `input_cache_write_1h`→cache_write_1h, `web_search`→tool fee; per-token → per-Mtok. Price key = the slug before `@` (and before any `:` suffix that isn't a separate catalogue entry). Models without cache-write pricing → 0. Fail the run start if a used model isn't in the catalogue and not hand-priced.
-3. Cross-check: `requests` gains vendor cost + provider columns (nullable); filled after the wake; report and dashboard show the delta. Failures to fetch are logged, never fatal.
-4. `openrouter.ai` on the allowlist in `config/*.yaml`.
-5. A sample agent `config/agents/<name>.yaml` on `z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash` (not added to the default runs). `.env.example`: `OPEN_ROUTER_API_KEY=`. Preflight: pi auth + one request through the proxy.
+Done.
+
+1. ✅ Agent config: `provider: openrouter` (default `native`), `key_env` (default `OPEN_ROUTER_API_KEY`, must be an env var name). `runtime: pi` ⇔ `provider: openrouter` for now. Run start fails naming the variable if it's unset; the parser fails if `openrouter.ai` isn't on the allowlist. The key goes in as `-e OPENROUTER_API_KEY`, its value only in the `docker run` child's env (`docker.ts` `dockerProcessEnv`).
+2. ✅ Pricing: tiers accept `per_mtok` absolute prices next to multipliers (fields a tier lacks keep the base price). `src/openrouter.ts` maps the catalogue (`min_prompt_tokens` overrides → tier above `min − 1`; time-window overrides not modelled) and inserts the entries as text into the `models:` block of the run's snapshot, other top-level sections untouched. A model in neither the catalogue nor `config/pricing.yaml` fails the run start. The same fetch writes pi's `models.json` per pi agent (needed for presets, §1.1): catalogue metadata, thinking-level map from `supported_efforts`, output capped at 32K.
+3. ✅ Cross-check: `requests.vendor_cost_usd` / `vendor_provider`, filled after the wake from `/api/v1/generation` (404s retried a few times; failures logged as `openrouter_cost` events). The wake's `reported_cost_usd` is their sum when every request resolved, so the existing report line and dashboard stat cover it; the report adds a by-provider table, the dashboard's request chips show the charge.
+4. ✅ `openrouter.ai` on the allowlist in `config/*.yaml`.
+5. ✅ Sample agent `config/agents/fern.yaml`; `.env.example`; preflight check 8 (models.json, one lean pi wake through the proxy, computed vs charged) and an `openrouter.ai` probe in check 3.
+
+**Finding:** the catalogue price is the list price; a preset routes to cheaper providers. In preflight check 8 (GLM 5.3 Flash via StreamLake) we computed $0.00184 and OpenRouter charged $0.00084 (−55%). Per-provider prices are at `/api/v1/models/<slug>/endpoints`; pricing each request at its serving provider's price (from the generation lookup) would close the gap, but is not done: our number is an upper bound.
 
 ## 3. Search relay
 
@@ -54,3 +58,5 @@ Done (pi 1.1.0).
 - ~~OpenRouter's Anthropic-style caching for GLM via pi~~ (not needed: GLM caches implicitly; §1.1). Models that need explicit `cache_control` (Anthropic, some Gemini) aren't covered yet.
 - Compaction usage: parsed from `compaction_end` and the session file's `compaction` entries, tested on a synthetic stream only.
 - Exa `costDollars` equals the bill.
+- A full `just smoke`-style run with a pi agent (only unit/controller tests and preflight check 8 so far).
+- Compaction and long-context tiers on real OpenRouter traffic.

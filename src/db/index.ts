@@ -37,6 +37,8 @@ export function openDb(path = DB_PATH, { readonly = false } = {}): Database {
 function migrate(db: Database): void {
   const has = (table: string, col: string) => db.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().some((c) => c.name === col);
   if (!has("controls", "detail")) db.exec("ALTER TABLE controls ADD COLUMN detail TEXT");
+  if (!has("requests", "vendor_cost_usd")) db.exec("ALTER TABLE requests ADD COLUMN vendor_cost_usd REAL");
+  if (!has("requests", "vendor_provider")) db.exec("ALTER TABLE requests ADD COLUMN vendor_provider TEXT");
 }
 
 export interface RunRow {
@@ -125,6 +127,9 @@ export interface RequestRow {
   prompt_tokens: number;
   tier: number;
   cost_usd: number;
+  /** OpenRouter's charged cost and serving provider (cross-check); null when not looked up. */
+  vendor_cost_usd: number | null;
+  vendor_provider: string | null;
 }
 
 export interface EventRow {

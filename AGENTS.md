@@ -7,7 +7,8 @@ Token-cost probe for a small society of CLI agents. The original spec, `docs/pla
 - **Map:**
   - `src/controller/`: scheduler, wake, notification poller, budget and `/self` writer (`/self/pricing.yaml` is the run's price table cut to the agent's own models; costing uses the full table). It is the only DB writer; the CLI and dashboard only enqueue into `controls`.
   - `src/runtimes/`: one adapter per CLI (`claude`, `codex`, `pi` for OpenRouter models). Fixture-tested in `test/fixtures/`.
-  - `src/pricing/`: per-request USD from `config/pricing.yaml`.
+  - `src/pricing/`: per-request USD from `config/pricing.yaml` (plus fetched OpenRouter list prices, frozen into the run).
+  - `src/openrouter.ts`: OpenRouter catalogue (prices, pi's `models.json` entries) and the per-generation charged-cost cross-check. OpenRouter agents: `runtime: pi`, `provider: openrouter`, `key_env` (default `OPEN_ROUTER_API_KEY`); keys go into containers by name only.
   - `src/docker.ts`, `src/proxy.ts`, `docker/`: the container and egress boundary.
   - `src/forge.ts`: the run's Forgejo (the agents' shared space): containers, accounts, agent logins, notification counts.
   - `src/github.ts`: the agents' public outlet: one GitHub org and shared account, logged in per wake from `secrets/github/token`.

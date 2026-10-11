@@ -3,12 +3,19 @@ import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { Effort, Runtime } from "./types.ts";
 
+export type ModelProvider = "native" | "openrouter";
+
 export interface AgentConfig {
   name: string;
   runtime: Runtime;
+  /** For OpenRouter, the model string as sent, e.g. `z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash`. */
   model: string;
   effort: Effort;
   budgetUsd: number;
+  /** `native`: the runtime's own vendor (Claude Code, Codex). `openrouter`: OpenRouter, via pi. */
+  provider: ModelProvider;
+  /** OpenRouter agents: the env var (in .env) holding the API key. Never the key itself. */
+  keyEnv?: string;
 }
 
 export interface SwarmConfig {
@@ -70,6 +77,12 @@ const GITHUB_NAME_RE = /^[a-zA-Z0-9](-?[a-zA-Z0-9])*$/;
 /** Domains the GitHub outlet needs on the allowlist (suffix match: github.com covers api.github.com). */
 export const GITHUB_DOMAINS = ["github.com", "githubusercontent.com"] as const;
 
+/** OpenRouter agents read their key from this env var unless they name another (`key_env`). */
+export const DEFAULT_OPENROUTER_KEY_ENV = "OPEN_ROUTER_API_KEY";
+/** The domain OpenRouter agents need on the allowlist (API and the generation cost lookup). */
+export const OPENROUTER_DOMAIN = "openrouter.ai";
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 export const DEFAULT_FORGE_IMAGE = "codeberg.org/forgejo/forgejo:16.0.4-rootless";
 
 export function parseAgent(raw: unknown, defaultBudget: number, source: string): AgentConfig {
@@ -78,12 +91,22 @@ export function parseAgent(raw: unknown, defaultBudget: number, source: string):
   if (!AGENT_NAME_RE.test(name)) throw new ConfigError(`${source}.name: must match ${AGENT_NAME_RE}`);
   // Forgejo rejects consecutive non-alphanumerics in usernames.
   if (name.includes("--")) throw new ConfigError(`${source}.name: must not contain "--"`);
+  const runtime = oneOf(a.runtime, `${source}.runtime`, ["claude", "codex", "pi"] as const);
+  const provider = oneOf(a.provider ?? "native", `${source}.provider`, ["native", "openrouter"] as const);
+  // Claude Code and Codex stay on their own vendors; pi runs OpenRouter models only (for now).
+  if ((runtime === "pi") !== (provider === "openrouter"))
+    throw new ConfigError(`${source}: runtime pi goes with provider: openrouter (and only pi does, for now)`);
+  if (a.key_env !== undefined && provider !== "openrouter") throw new ConfigError(`${source}.key_env: only for provider: openrouter`);
+  const keyEnv = provider === "openrouter" ? str(a.key_env ?? DEFAULT_OPENROUTER_KEY_ENV, `${source}.key_env`) : undefined;
+  if (keyEnv !== undefined && !ENV_NAME_RE.test(keyEnv)) throw new ConfigError(`${source}.key_env: not an environment variable name`);
   return {
     name,
-    runtime: oneOf(a.runtime, `${source}.runtime`, ["claude", "codex", "pi"] as const),
+    runtime,
     model: str(a.model, `${source}.model`),
     effort: oneOf(a.effort ?? "medium", `${source}.effort`, ["low", "medium", "high"] as const),
     budgetUsd: a.budget_usd === undefined ? defaultBudget : num(a.budget_usd, `${source}.budget_usd`),
+    provider,
+    ...(keyEnv !== undefined ? { keyEnv } : {}),
   };
 }
 
@@ -153,8 +176,14 @@ export function parseSwarm(
     },
   };
   if (cfg.scheduler.maxSleepMs > cfg.run.maxDurationMs) throw new ConfigError("scheduler: max_sleep_min longer than run.max_duration_min");
+  if (agents.some((a) => a.provider === "openrouter") && !onAllowlist(cfg.network.allowlist, OPENROUTER_DOMAIN))
+    throw new ConfigError(`network.allowlist needs ${OPENROUTER_DOMAIN} for the OpenRouter agents`);
   if (s.github === undefined) return cfg;
   return { ...cfg, github: parseGithub(s.github, cfg.network.allowlist) };
+}
+
+function onAllowlist(allowlist: string[], domain: string): boolean {
+  return allowlist.some((a) => a.trim().toLowerCase().replace(/^\*?\./, "") === domain);
 }
 
 function parseGithub(raw: unknown, allowlist: string[]): { org: string; user: string } {
@@ -164,7 +193,7 @@ function parseGithub(raw: unknown, allowlist: string[]): { org: string; user: st
     if (!GITHUB_NAME_RE.test(n)) throw new ConfigError(`${field}: not a valid GitHub name`);
     return n;
   };
-  const missing = GITHUB_DOMAINS.filter((d) => !allowlist.some((a) => a.trim().toLowerCase().replace(/^\*?\./, "") === d));
+  const missing = GITHUB_DOMAINS.filter((d) => !onAllowlist(allowlist, d));
   if (missing.length) throw new ConfigError(`github: network.allowlist needs ${missing.join(", ")}`);
   return { org: name(gh.org, "github.org"), user: name(gh.user, "github.user") };
 }

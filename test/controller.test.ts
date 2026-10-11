@@ -58,21 +58,29 @@ interface Harness {
   runId: string;
   clock: { t: number };
   argvs: string[][];
+  /** The env each `docker run` got. */
+  envs: Record<string, string | undefined>[];
   kills: string[];
   /** For a second controller on the same run (a resume). */
   ctlOpts: ControllerOptions;
 }
 
 /** `behave(agent, argv)` returns the stdout text, or null to hang until killed. */
-function harness(cfg: SwarmConfig, behave: (agent: string, argv: string[]) => string | null, opts: { killMisses?: number } = {}): Harness {
+function harness(
+  cfg: SwarmConfig,
+  behave: (agent: string, argv: string[]) => string | null,
+  opts: { killMisses?: number; pricingYaml?: string; wakeDeps?: ControllerOptions["wakeDeps"] } = {},
+): Harness {
   const db = openDb(":memory:");
   const clock = { t: T0 };
-  const runId = createRun(db, cfg, { cliVersions: { claude: "2.1.296" } }, T0);
+  const runId = createRun(db, cfg, { cliVersions: { claude: "2.1.296" }, pricingYaml: opts.pricingYaml }, T0);
   const argvs: string[][] = [];
+  const envs: Record<string, string | undefined>[] = [];
   const kills: string[] = [];
   const pending = new Map<string, () => void>();
-  const startProcess = (argv: string[]): ProcessHandle => {
+  const startProcess = (argv: string[], _stderr: string, env: Record<string, string | undefined>): ProcessHandle => {
     argvs.push(argv);
+    envs.push(env);
     const name = argv[argv.indexOf("--name") + 1]!;
     const agent = argv.find((a) => a.startsWith("slopswarm.agent="))!.split("=")[1]!;
     const out = behave(agent, argv);
@@ -104,9 +112,9 @@ function harness(cfg: SwarmConfig, behave: (agent: string, argv: string[]) => st
     else pending.get(name)?.();
   };
   const forge = new FakeForge();
-  const ctlOpts: ControllerOptions = { forge, log: () => {}, now: () => clock.t, wakeDeps: { startProcess, killContainer } };
+  const ctlOpts: ControllerOptions = { forge, log: () => {}, now: () => clock.t, wakeDeps: { startProcess, killContainer, ...opts.wakeDeps } };
   const ctl = new Controller(db, runId, cfg, ctlOpts);
-  return { ctl, forge, db, runId, clock, argvs, kills, ctlOpts };
+  return { ctl, forge, db, runId, clock, argvs, envs, kills, ctlOpts };
 }
 
 const agentRow = (h: Harness, name: string) => h.db.query<AgentRow, [string, string]>("SELECT * FROM agents WHERE run_id = ? AND name = ?").get(h.runId, name)!;
@@ -507,5 +515,51 @@ describe("controller", () => {
     await h.ctl.recover();
     expect(agentRow(h, "bramble")).toMatchObject({ status: "sleeping", next_wake_at: T0 + 9 * MIN, next_trigger: "self", continue_next: 1 });
     expect(wakesOf(h, "bramble")[0]).toMatchObject({ next_in_minutes: 7, continue_requested: 1 });
+  });
+  test("pi on OpenRouter: key passed by name, preset priced as its slug, max turns from the stream, vendor cross-check", async () => {
+    const base = loadSwarm("config/smoke.yaml");
+    const parsed = parseSwarm(
+      {
+        run: { name: "pi-test", max_duration_min: 120 },
+        agents: ["fern"],
+        budgets: { swarm_usd: 1, per_agent_usd: 0.5, per_wake: { max_usd: 0.1, max_turns: 1, timeout_min: 5 } },
+        scheduler: { max_sleep_min: 15 },
+        network: { name: "slopswarm-internal", proxy: "http://slopswarm-proxy:8888", allowlist: ["openrouter.ai"] },
+      },
+      (name) => ({ name, runtime: "pi", provider: "openrouter", model: "z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash", key_env: "TEST_OR_KEY", effort: "low" }),
+    );
+    const cfg = { ...parsed, paths: base.paths, snapshot: "# --- test\n" };
+    const pricingYaml = `${readFileSync(base.paths.pricing, "utf8")}\n  "z-ai/glm-5.3-flash":\n    provider: openrouter\n    per_mtok: { input: 0.15, output: 0.5, cache_read: 0.03 }\n`;
+    process.env.TEST_OR_KEY = "sk-test-not-real";
+    const looked: string[][] = [];
+    const vendorCosts = async (ids: string[], key: string) => {
+      expect(key).toBe("sk-test-not-real");
+      looked.push(ids);
+      return new Map(ids.map((id) => [id, { costUsd: 0.00001, provider: "StreamLake" }]));
+    };
+    // Two assistant turns (a tool call, then the reply): one more than max_turns.
+    const h = harness(cfg, () => readFileSync("test/fixtures/pi-resume-wake2.jsonl", "utf8"), { pricingYaml, wakeDeps: { vendorCosts } });
+    h.ctl.tick();
+    await h.ctl.whenIdle();
+    delete process.env.TEST_OR_KEY;
+
+    const argv = h.argvs[0]!;
+    expect(argv[argv.indexOf("OPENROUTER_API_KEY") - 1]).toBe("-e");
+    expect(argv.join(" ")).not.toContain("sk-test-not-real");
+    expect(h.envs[0]!.OPENROUTER_API_KEY).toBe("sk-test-not-real");
+    expect(argv).toContain("z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash");
+
+    const [w] = wakesOf(h, "fern");
+    expect(w!.exit_reason).toBe("max_turns");
+    expect(h.kills).toHaveLength(1);
+    const reqs = h.db.query<RequestRow, [number]>("SELECT * FROM requests WHERE wake_id = ? ORDER BY seq").all(w!.id);
+    expect(reqs.map((r) => r.model)).toEqual(["z-ai/glm-5.3-flash", "z-ai/glm-5.3-flash"]);
+    expect(w!.cost_usd).toBeCloseTo((585 * 0.15 + 768 * 0.03 + 19 * 0.5 + 34 * 0.15 + 1344 * 0.03 + 3 * 0.5) / 1e6, 12);
+    expect(looked).toEqual([reqs.map((r) => r.request_id)]);
+    expect(reqs.every((r) => r.vendor_cost_usd === 0.00001 && r.vendor_provider === "StreamLake")).toBe(true);
+    expect(w!.reported_cost_usd).toBeCloseTo(0.00002, 12);
+    // The agent sees its model's price under the slug.
+    expect(readFileSync(join(agentDirs(h.runId, "fern").self, "pricing.yaml"), "utf8")).toContain("z-ai/glm-5.3-flash");
+    expect(renderReport(h.db, h.runId)).toContain("| StreamLake | 2 |");
   });
 });

@@ -2,6 +2,7 @@
 // for per-request usage. Used for OpenRouter models (plan docs/plans/2026-10-11-openrouter.md §1).
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { priceKey } from "../pricing/index.ts";
 import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, RuntimeAdapter, StreamParser } from "../types.ts";
 import { findFiles, n, parseJsonLine, readJsonLines, short } from "./util.ts";
 
@@ -10,15 +11,6 @@ export const PI_TOOLS = "read,bash,edit,write";
 /** Under the runtime mount: pi's agent dir (models.json, auth.json, …) and its session files. */
 export const PI_AGENT_SUBDIR = "pi";
 export const PI_SESSION_SUBDIR = "sessions";
-
-/**
- * The model name requests are priced under: an OpenRouter preset reference (`slug@preset/name`) is priced
- * as the model before the `@`; the preset only holds provider routing.
- */
-export function priceKey(model: string): string {
-  const at = model.indexOf("@");
-  return at > 0 ? model.slice(0, at) : model;
-}
 
 /**
  * pi's `usage`: `input` EXCLUDES cache reads and writes; `cacheWrite1h` is the 1h-TTL subset of `cacheWrite`;

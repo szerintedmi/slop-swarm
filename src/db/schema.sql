@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS wakes (
   resumed         INTEGER NOT NULL DEFAULT 0,
   session_id      TEXT,
   cost_usd        REAL NOT NULL DEFAULT 0,
-  reported_cost_usd REAL,                   -- vendor-reported (Claude total_cost_usd), cross-check
+  reported_cost_usd REAL,                   -- vendor-reported (Claude total_cost_usd, OpenRouter's summed charges), cross-check
   requests        INTEGER NOT NULL DEFAULT 0,
   fresh_input     INTEGER NOT NULL DEFAULT 0,
   cache_read      INTEGER NOT NULL DEFAULT 0,
@@ -91,6 +91,8 @@ CREATE TABLE IF NOT EXISTS requests (
   prompt_tokens   INTEGER NOT NULL,
   tier            INTEGER NOT NULL,         -- 0 = base, else the threshold applied
   cost_usd        REAL NOT NULL,
+  vendor_cost_usd REAL,                     -- what the vendor charged (OpenRouter generation lookup), cross-check
+  vendor_provider TEXT,                     -- who served it (OpenRouter's provider_name)
   UNIQUE (wake_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS requests_run_agent ON requests(run_id, agent);

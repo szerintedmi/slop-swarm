@@ -4,9 +4,11 @@ import { copyFileSync, createWriteStream, existsSync, lstatSync, readdirSync, re
 import { join } from "node:path";
 import type { SwarmConfig } from "../config.ts";
 import { agentDirs, type WakeRow } from "../db/index.ts";
-import { dockerRunArgs, MOUNTS, type ContainerSpec } from "../docker.ts";
+import type { AgentConfig } from "../config.ts";
+import { dockerProcessEnv, dockerRunArgs, MOUNTS, type ContainerSpec } from "../docker.ts";
 import { forgeEnv, forgeHost, forgeUrl, type ForgeApi } from "../forge.ts";
 import { githubEnv, writeGithubLogin } from "../github.ts";
+import { generationCosts, type VendorCost } from "../openrouter.ts";
 import { computeCost, type PricingTable } from "../pricing/index.ts";
 import { getAdapter } from "../runtimes/index.ts";
 import type { AgentEvent, CostBreakdown, RequestUsage, Runtime, RuntimeAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
@@ -45,11 +47,13 @@ export interface WakeDeps {
   githubTokenPath: string;
   /** The run's forge: unread notification counts (plan §4.5). */
   forge: ForgeApi;
-  /** Start `docker run …`; injectable for tests. stderr goes to `stderrPath`. */
-  startProcess?: (argv: string[], stderrPath: string) => ProcessHandle;
+  /** Start `docker run …` with `env` as its environment; injectable for tests. stderr goes to `stderrPath`. */
+  startProcess?: (argv: string[], stderrPath: string, env: Record<string, string | undefined>) => ProcessHandle;
   /** Kill the wake's container; injectable for tests. */
   killContainer?: (name: string) => Promise<void>;
   adapterFor?: (runtime: Runtime) => RuntimeAdapter;
+  /** OpenRouter's charged cost per generation id (cross-check); injectable for tests. */
+  vendorCosts?: (ids: string[], key: string) => Promise<Map<string, VendorCost>>;
   now?: () => number;
 }
 
@@ -69,8 +73,8 @@ export interface WakeOutcome {
   costUsd: number;
 }
 
-function defaultStart(argv: string[], stderrPath: string): ProcessHandle {
-  const p = Bun.spawn(argv, { stdout: "pipe", stderr: Bun.file(stderrPath), stdin: "ignore", env: process.env });
+function defaultStart(argv: string[], stderrPath: string, env: Record<string, string | undefined>): ProcessHandle {
+  const p = Bun.spawn(argv, { stdout: "pipe", stderr: Bun.file(stderrPath), stdin: "ignore", env });
   return { stdout: p.stdout, exited: p.exited };
 }
 
@@ -132,6 +136,12 @@ function reportedCostOf(adapter: RuntimeAdapter, model: string, lines: string[])
   return reported;
 }
 
+/** Secrets a runtime's container gets by name (never in argv): the Claude token, or the agent's OpenRouter key. */
+export function secretEnv(agent: Pick<AgentConfig, "runtime" | "provider" | "keyEnv">): NonNullable<ContainerSpec["passEnv"]> {
+  if (agent.provider === "openrouter" && agent.keyEnv) return [{ name: "OPENROUTER_API_KEY", from: agent.keyEnv }];
+  return agent.runtime === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
+}
+
 /**
  * When a wake starting at `startedAt` is stopped if it is still running: after the per-wake timeout, or at
  * the world end plus `graceMs`, whichever comes first (plan §6).
@@ -149,6 +159,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
   const killContainer = deps.killContainer ?? defaultKill;
   const a = repo.agent(agentName);
   const adapter = (deps.adapterFor ?? getAdapter)(a.runtime);
+  const agentCfg = cfg.agents.find((x) => x.name === a.name);
   const dirs = agentDirs(repo.runId, a.name);
   const seq = a.wake_count + 1;
   const startedAt = now();
@@ -274,7 +285,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       agent: a.name,
       mounts: { home: dirs.home, self: dirs.self, runtime: dirs.runtime },
       env: { ...adapter.containerEnv(MOUNTS.runtime), ...forgeEnv(repo.runId), ...(cfg.github ? githubEnv() : {}) },
-      passEnv: a.runtime === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [],
+      passEnv: secretEnv(agentCfg ?? { runtime: a.runtime, provider: "native" }),
       argv,
       network: cfg.network.name,
       proxy: cfg.network.proxy,
@@ -282,6 +293,24 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       limits: cfg.controller.container,
     };
     repo.lifecycle("wake_start", `${trigger}${resumed ? " (resumed)" : ""}`, a.name, wakeId);
+
+    /**
+     * OpenRouter's charged cost and serving provider per request, beside ours (which stays authoritative). The
+     * wake's vendor-reported cost is set only when every request resolved. Never fails the wake.
+     */
+    const crossCheck = async (keyEnv: string, requestIds: string[]) => {
+      const ids = requestIds.filter((id) => id.startsWith("gen-"));
+      const key = process.env[keyEnv];
+      if (!ids.length || !key) return;
+      try {
+        const found = await (deps.vendorCosts ?? ((i: string[], k: string) => generationCosts(i, k)))(ids, key);
+        repo.setVendorCosts(wakeId, found);
+        if (found.size === requestIds.length) repo.updateWake(wakeId, { reported_cost_usd: [...found.values()].reduce((s, v) => s + v.costUsd, 0) });
+        if (found.size < ids.length) repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "openrouter_cost", detail: `${ids.length - found.size} of ${ids.length} generation(s) not found`, ok: 0 });
+      } catch (err) {
+        repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "openrouter_cost", detail: short(String(err)), ok: 0 });
+      }
+    };
 
     // Live streaming + costing.
     const parser = adapter.newParser({ model: a.model });
@@ -353,7 +382,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
 
     // An emergency kill during the setup above must not start a container now.
     if (abortReason) proc = { stdout: new ReadableStream<Uint8Array>({ start: (c) => c.close() }), exited: Promise.resolve(-1) };
-    else proc = startProcess(dockerRunArgs(spec), rawLog.replace(/\.jsonl$/, ".stderr.log"));
+    else proc = startProcess(dockerRunArgs(spec), rawLog.replace(/\.jsonl$/, ".stderr.log"), dockerProcessEnv(spec));
     arm();
     // Codex streams usage only at turn end; its rollout file has per-request usage as it happens.
     poll = setInterval(() => void refresh(true), LIVE_POLL_MS);
@@ -470,6 +499,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       next_trigger: nextTrigger,
     });
     repo.lifecycle("wake_end", `${exitReason}, $${total.toFixed(4)}${status !== "sleeping" ? `, now ${status}` : ""}`, a.name, wakeId);
+    if (agentCfg?.provider === "openrouter" && agentCfg.keyEnv) await crossCheck(agentCfg.keyEnv, rows.map((r) => r.u.requestId));
     return { wakeId, exitReason, costUsd: total };
   })().catch((err) => {
     disarm();

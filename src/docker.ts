@@ -8,8 +8,11 @@ export interface ContainerSpec {
   /** Host paths. Agents share nothing on disk; their shared world is the forge (plan §4.5). */
   mounts: { home: string; self: string; runtime: string };
   env: Record<string, string>;
-  /** Names passed as `-e NAME`: the value comes from the docker CLI's own env, so secrets never appear in argv. */
-  passEnv?: string[];
+  /**
+   * Names passed as `-e NAME`: the value comes from the docker CLI's own env, so secrets never appear in argv.
+   * `{ name, from }` passes the host variable `from` as `name` (see dockerProcessEnv).
+   */
+  passEnv?: (string | { name: string; from: string })[];
   argv: string[];
   network: string;
   proxy: string;
@@ -57,9 +60,19 @@ export function dockerRunArgs(spec: ContainerSpec): string[] {
     "-v", `${spec.mounts.runtime}:${MOUNTS.runtime}:rw`,
   ];
   for (const [k, v] of Object.entries(env)) args.push("-e", `${k}=${v}`);
-  for (const k of spec.passEnv ?? []) args.push("-e", k);
+  for (const k of spec.passEnv ?? []) args.push("-e", typeof k === "string" ? k : k.name);
   args.push(spec.image, ...spec.argv);
   return args;
+}
+
+/**
+ * The env for the `docker run` process: `base` plus each renamed passEnv variable under its container name, so
+ * `-e NAME` picks it up. The value only ever lives in that child's env.
+ */
+export function dockerProcessEnv(spec: Pick<ContainerSpec, "passEnv">, base: Record<string, string | undefined> = process.env): Record<string, string | undefined> {
+  const env = { ...base };
+  for (const k of spec.passEnv ?? []) if (typeof k !== "string") env[k.name] = base[k.from];
+  return env;
 }
 
 async function run(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {

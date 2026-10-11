@@ -109,6 +109,23 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
     out.push(`Cross-check on ${checked.length} wake(s) with a vendor-reported cost: computed ${$(ours)} vs reported ${$(theirs)} (${pct(ours / theirs - 1)} difference).`, "");
   }
 
+  // OpenRouter: what each generation was charged and which provider served it (list price vs routed price).
+  const vendor = requests.filter((r) => r.vendor_cost_usd !== null);
+  if (vendor.length) {
+    const byProvider = new Map<string, RequestRow[]>();
+    for (const r of vendor) byProvider.set(r.vendor_provider ?? "?", [...(byProvider.get(r.vendor_provider ?? "?") ?? []), r]);
+    const row = (k: string, rs: RequestRow[]) => {
+      const ours = rs.reduce((s, r) => s + r.cost_usd, 0);
+      const theirs = rs.reduce((s, r) => s + r.vendor_cost_usd!, 0);
+      return [k, rs.length, $(ours), $(theirs), theirs > 0 ? pct(ours / theirs - 1) : "-"];
+    };
+    out.push(
+      `OpenRouter charges on ${vendor.length} request(s) (we compute list prices; the provider a preset routes to may charge less):`,
+      "",
+      mdTable(["served by", "requests", "computed", "charged", "difference"], [...[...byProvider].map(([k, rs]) => row(k, rs)), row("all", vendor)]),
+    );
+  }
+
   out.push("## Per wake", "");
   const idle = wakes.filter((w) => w.tool_calls <= IDLE_TOOL_CALLS);
   out.push(mdTable(["set", "wakes", "median", "p90", "total"], [["all wakes", ...stats(wakes)], [`idle floor (≤${IDLE_TOOL_CALLS} tool calls)`, ...stats(idle)]]));

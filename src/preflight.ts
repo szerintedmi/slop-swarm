@@ -3,12 +3,15 @@
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadSwarm, type SwarmConfig } from "./config.ts";
+import { OPENROUTER_DOMAIN, loadSwarm, parseAgent, type AgentConfig, type SwarmConfig } from "./config.ts";
 import { fillSeed, SYSTEM_PROMPT_FILE } from "./controller/run.ts";
 import { DATA_DIR } from "./db/index.ts";
-import { dockerRunArgs, imageInfo, MOUNTS } from "./docker.ts";
+import { dockerProcessEnv, dockerRunArgs, imageInfo, MOUNTS, type ContainerSpec } from "./docker.ts";
 import { forgeUrl } from "./forge.ts";
-import { computeCost, loadPricing } from "./pricing/index.ts";
+import { computeCost, loadPricing, parsePricing } from "./pricing/index.ts";
+import { generationCosts, prepareOpenRouter } from "./openrouter.ts";
+import { secretEnv } from "./controller/wake.ts";
+import { writePiModels } from "./runtimes/pi.ts";
 import { AGENT_IMAGE, ensureAgentImage, ensureProxy } from "./proxy.ts";
 import { getAdapter } from "./runtimes/index.ts";
 import type { AgentEvent, RequestUsage, Runtime } from "./types.ts";
@@ -49,6 +52,7 @@ class Preflight {
   }
 
   model(runtime: Runtime): string {
+    if (runtime === "pi") return piAgent(this.cfg).model;
     return this.cfg.agents.find((a) => a.runtime === runtime)?.model ?? (runtime === "claude" ? "claude-haiku-5-5" : "gpt-6-luna");
   }
 
@@ -62,7 +66,7 @@ class Preflight {
   async container(
     agent: string,
     argv: string[],
-    { env = {}, passEnv = [] }: { env?: Record<string, string>; passEnv?: string[] } = {},
+    { env = {}, passEnv = [] }: { env?: Record<string, string>; passEnv?: NonNullable<ContainerSpec["passEnv"]> } = {},
   ): Promise<RunOutput> {
     const dirs = this.agentDirs(agent);
     const name = `slopswarm-preflight-${agent}-${process.pid}-${++this.seq}`;
@@ -79,7 +83,7 @@ class Preflight {
       proxy: this.cfg.network.proxy,
       limits: this.cfg.controller.container,
     });
-    const p = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    const p = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore", env: dockerProcessEnv({ passEnv }) });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -106,7 +110,7 @@ class Preflight {
     }
     let argv = adapter.buildCommand({ prompt, model: this.model(runtime), effort: "medium", maxTurns, systemPrompt });
     if (extraArgs.length) argv = runtime === "codex" ? [...argv.slice(0, -1), ...extraArgs, argv[argv.length - 1]!] : [...argv, ...extraArgs];
-    const passEnv = runtime === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
+    const passEnv = runtime === "pi" ? secretEnv(piAgent(this.cfg)) : runtime === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
     const out = await this.container(agent, argv, { env: adapter.containerEnv(MOUNTS.runtime), passEnv });
     const parser = adapter.newParser();
     const lines = out.stdout.split("\n").filter((l) => l.trim());
@@ -197,6 +201,13 @@ function turnEnd(r: CliRun) {
   return r.events.find((e): e is Extract<AgentEvent, { kind: "turn_end" }> => e.kind === "turn_end");
 }
 
+/** The pi agent the checks use: the config's first, else the sample `config/agents/fern.yaml`. */
+function piAgent(cfg: SwarmConfig): AgentConfig {
+  const a = cfg.agents.find((x) => x.runtime === "pi");
+  if (a) return a;
+  return parseAgent(Bun.YAML.parse(readFileSync(join(cfg.paths.configDir, "agents", "fern.yaml"), "utf8")), 1, "agents/fern.yaml");
+}
+
 const hasClaudeToken = () => !!process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
 const hasCodexAuth = () => existsSync(CODEX_AUTH);
 
@@ -257,6 +268,7 @@ async function check3(pf: Preflight): Promise<Result> {
       `echo "example $(code https://example.com)"`,
       `echo "anthropic $(code https://api.anthropic.com/v1/messages)"`,
       `echo "chatgpt $(code https://chatgpt.com/backend-api/codex)"`,
+      `echo "openrouter $(code https://openrouter.ai/api/v1/models)"`,
       `echo "direct $(curl -sS -m 5 --noproxy '*' -o /dev/null https://api.anthropic.com 2>/dev/null; echo rc=$?)"`,
     ].join("\n"),
   ]);
@@ -269,6 +281,8 @@ async function check3(pf: Preflight): Promise<Result> {
   if (!http("anthropic")) problems.push(`api.anthropic.com not reachable via proxy (${line("anthropic")})`);
   if (!http("chatgpt")) problems.push(`chatgpt.com not reachable via proxy (${line("chatgpt")})`);
   if (/rc=0/.test(line("direct"))) problems.push("direct egress without proxy works");
+  const wantsOpenRouter = pf.cfg.network.allowlist.some((d) => d.trim().toLowerCase().replace(/^\*?\./, "") === OPENROUTER_DOMAIN);
+  if (wantsOpenRouter && !http("openrouter")) problems.push(`openrouter.ai not reachable via proxy (${line("openrouter")})`);
   if (problems.length) return fail(problems.join("; "));
   const notes = ["example.com blocked, model APIs reachable only via proxy"];
 
@@ -431,6 +445,28 @@ async function check7(pf: Preflight): Promise<Result> {
   return pass(`first-request prompt: ${notes.join("; ")}`);
 }
 
+async function check8(pf: Preflight): Promise<Result> {
+  const agent = piAgent(pf.cfg);
+  const key = agent.keyEnv ? process.env[agent.keyEnv]?.trim() : undefined;
+  if (!key) return skip(`${agent.keyEnv ?? "the OpenRouter key"} not set in .env`);
+  // What a run does at start: fetched prices and pi's models.json entry.
+  const setup = await prepareOpenRouter([agent], readFileSync(pf.cfg.paths.pricing, "utf8"));
+  writePiModels(pf.agentDirs("pi-hi").runtime, setup.piModels[agent.name]);
+  const r = await pf.cli("pi", "pi-hi", "say hi", [], 3);
+  saveFixture("preflight-pi-hi.jsonl", r.stdout);
+  const end = turnEnd(r);
+  if (r.code !== 0 || end?.reason !== "completed" || !r.usage.length)
+    return fail(`exit ${r.code}, ${end?.reason ?? "no end"}, ${r.usage.length} request(s): ${end?.detail ?? lastLine(r.stderr)}`);
+  const pricing = parsePricing(setup.pricingYaml);
+  const computed = r.usage.reduce((s, u) => s + computeCost(u, pricing).costUsd, 0);
+  const charged = await generationCosts(r.usage.map((u) => u.requestId), key);
+  const theirs = [...charged.values()].reduce((s, v) => s + v.costUsd, 0);
+  const via = [...new Set([...charged.values()].map((v) => v.provider ?? "?"))].join(", ");
+  return pass(
+    `${agent.model}: ${r.usage.length} request(s), computed $${computed.toFixed(6)} (list price) vs charged $${theirs.toFixed(6)} via ${via || "?"} (${charged.size}/${r.usage.length} looked up)`,
+  );
+}
+
 const CHECKS: [number, string, (pf: Preflight) => Promise<Result>][] = [
   [1, "Claude in a container (OAuth, --effort)", check1],
   [2, "Codex in a container (auth refresh rotation)", check2],
@@ -439,6 +475,7 @@ const CHECKS: [number, string, (pf: Preflight) => Promise<Result>][] = [
   [5, "Token-field fixtures", check5],
   [6, "Pricing cross-check (Claude ±1%)", check6],
   [7, "Lean harness overhead (stock vs lean system prompt)", check7],
+  [8, "pi + OpenRouter in a container (key, preset, cost cross-check)", check8],
 ];
 
 export async function runPreflight(opts: { swarmPath: string; only?: number[] }): Promise<boolean> {

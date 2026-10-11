@@ -12,10 +12,12 @@ import { buildDashboard } from "./dashboard/build.ts";
 import { agentDirs, DATA_DIR, DB_PATH, enqueueControl, getRun, latestRun, openDb, type AgentRow, type ControlAction, type RunRow, type WakeRow } from "./db/index.ts";
 import { dockerKillLabelled, imageInfo } from "./docker.ts";
 import { forgeAdminFromEnv, forgeDataDir, forgePort, FORWARDER_IMAGE, provisionAgents, startForge, stopForge, type ForgeClient } from "./forge.ts";
+import { prepareOpenRouter } from "./openrouter.ts";
 import { AGENT_IMAGE, buildImages, ensureAgentImage, ensureProxy } from "./proxy.ts";
 import { runPreflight } from "./preflight.ts";
 import { renderReport } from "./report.ts";
 import { getAdapter } from "./runtimes/index.ts";
+import { writePiModels } from "./runtimes/pi.ts";
 import { describeExtension, parseExtendArgs, parseExtendDetail, swarmBudgetUsd, worldTime } from "./world.ts";
 
 const ROOT = join(import.meta.dir, "..");
@@ -82,6 +84,7 @@ function takeLock(): void {
 function assertSecrets(cfg: ReturnType<typeof loadSwarm>): void {
   if (cfg.agents.some((a) => a.runtime === "claude") && !process.env.CLAUDE_CODE_OAUTH_TOKEN) die("CLAUDE_CODE_OAUTH_TOKEN is not set in .env");
   if (cfg.agents.some((a) => a.runtime === "codex") && !existsSync(CODEX_AUTH_PATH)) die(`codex agents need ${CODEX_AUTH_PATH} (copy ~/.codex/auth.json)`);
+  for (const a of cfg.agents) if (a.keyEnv && !process.env[a.keyEnv]?.trim()) die(`${a.name}: ${a.keyEnv} is not set in .env (its OpenRouter key)`);
   if (!forgeAdminFromEnv()) die("FORGE_ADMIN_PASSWORD is not set in .env (`just setup` generates one)");
   if (cfg.github && !existsSync(GITHUB_TOKEN_PATH)) die(`the github outlet needs ${GITHUB_TOKEN_PATH} (a token for ${cfg.github.user}; or remove github: from the config)`);
 }
@@ -224,9 +227,17 @@ const commands: Record<string, (args: string[]) => Promise<void> | void> = {
     await ensureAgentImage();
     const info = await imageInfo(AGENT_IMAGE);
     if (!info) die(`image ${AGENT_IMAGE} could not be built`);
+    // OpenRouter agents: prices and pi's model entries from the public catalogue, frozen into the run.
+    let openrouter;
+    try {
+      openrouter = await prepareOpenRouter(cfg.agents, readFileSync(cfg.paths.pricing, "utf8"));
+    } catch (e) {
+      die(`OpenRouter: ${(e as Error).message}`);
+    }
     const db = openDb();
-    const runId = createRun(db, cfg, { cliVersions: { claude: info.claude, codex: info.codex, pi: info.pi }, imageDigest: info.digest });
+    const runId = createRun(db, cfg, { cliVersions: { claude: info.claude, codex: info.codex, pi: info.pi }, imageDigest: info.digest, pricingYaml: openrouter.pricingYaml });
     db.close();
+    for (const [name, models] of Object.entries(openrouter.piModels)) writePiModels(agentDirs(runId, name).runtime, models);
     console.log(`run ${runId} started (${cfg.agents.map((a) => a.name).join(", ")})`);
     await runController(runId, cfg, port, fport);
   },

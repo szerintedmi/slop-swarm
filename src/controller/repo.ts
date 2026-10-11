@@ -1,6 +1,7 @@
 // Controller-side DB writes and the reads they depend on.
 import type { Database } from "bun:sqlite";
 import type { AgentRow, ControlAction, EventRow, ExtensionRow, WakeRow } from "../db/index.ts";
+import { priceKey } from "../pricing/index.ts";
 import type { CostBreakdown, RequestUsage } from "../types.ts";
 
 export class Repo {
@@ -55,13 +56,14 @@ export class Repo {
       .query<WakeRow, [string, string]>("SELECT * FROM wakes WHERE run_id = ? AND agent = ? AND ended_at IS NOT NULL ORDER BY seq")
       .all(this.runId, agent);
   }
-  /** The agent's own models: its configured model plus every model its past requests were billed for. */
+  /** The agent's own models (as priced): its configured model plus every model its past requests were billed for. */
   agentModels(agent: string): string[] {
     const billed = this.db
       .query<{ model: string }, [string, string]>("SELECT DISTINCT model FROM requests WHERE run_id = ? AND agent = ? ORDER BY model")
       .all(this.runId, agent)
       .map((r) => r.model);
-    return [...new Set([this.agent(agent).model, ...billed])];
+    // An OpenRouter preset reference is priced as the model before the `@`.
+    return [...new Set([priceKey(this.agent(agent).model), ...billed])];
   }
   openWakes(): WakeRow[] {
     return this.db.query<WakeRow, [string]>("SELECT * FROM wakes WHERE run_id = ? AND ended_at IS NULL").all(this.runId);
@@ -81,6 +83,14 @@ export class Repo {
         ins.run(wakeId, this.runId, agent, i + 1, u.requestId, u.model, u.ts ?? null, u.freshInput, u.cacheRead, u.cacheWrite5m,
           u.cacheWrite1h, u.output, u.reasoning, u.webSearches, c.promptTokens, c.tier, c.costUsd),
       );
+    })();
+  }
+
+  /** The vendor's charged cost and serving provider for a wake's requests (by request id). */
+  setVendorCosts(wakeId: number, costs: Map<string, { costUsd: number; provider: string | null }>): void {
+    const q = this.db.query("UPDATE requests SET vendor_cost_usd = ?, vendor_provider = ? WHERE wake_id = ? AND request_id = ?");
+    this.db.transaction(() => {
+      for (const [id, c] of costs) q.run(c.costUsd, c.provider, wakeId, id);
     })();
   }
 

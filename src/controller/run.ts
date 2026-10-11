@@ -18,12 +18,13 @@ export function makeRunId(name: string, now = Date.now()): string {
 export function createRun(
   db: Database,
   cfg: SwarmConfig,
-  meta: { cliVersions?: Record<string, string | undefined>; imageDigest?: string },
+  /** `pricingYaml`: the pricing snapshot (config/pricing.yaml plus fetched OpenRouter prices); default: the file. */
+  meta: { cliVersions?: Record<string, string | undefined>; imageDigest?: string; pricingYaml?: string },
   now = Date.now(),
 ): string {
   const id = makeRunId(cfg.run.name, now);
   const seed = readFileSync(cfg.paths.seed, "utf8");
-  const pricing = readFileSync(cfg.paths.pricing, "utf8");
+  const pricing = meta.pricingYaml ?? readFileSync(cfg.paths.pricing, "utf8");
 
   for (const a of cfg.agents) {
     const d = agentDirs(id, a.name);

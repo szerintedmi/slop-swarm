@@ -28,6 +28,7 @@ network:
     - chatgpt.com
     - api.openai.com
     - auth.openai.com
+    - openrouter.ai           # OpenRouter models (pi agents) and the generation cost lookup
     - github.com              # the GitHub outlet (github: below); covers api. and uploads.
     - githubusercontent.com   # raw files, release assets
 
