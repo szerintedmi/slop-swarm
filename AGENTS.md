@@ -6,7 +6,7 @@ Token-cost probe for a small society of CLI agents. The original spec, `docs/pla
 - **Verify:** run `just test` and `just typecheck` before you finish. `just preflight` needs Docker and the secrets.
 - **Map:**
   - `src/controller/`: scheduler, wake, notification poller, budget and `/self` writer (`/self/pricing.yaml` is the run's price table cut to the agent's own models; costing uses the full table). It is the only DB writer; the CLI and dashboard only enqueue into `controls`.
-  - `src/runtimes/`: one adapter per CLI. Fixture-tested in `test/fixtures/`.
+  - `src/runtimes/`: one adapter per CLI (`claude`, `codex`, `pi` for OpenRouter models). Fixture-tested in `test/fixtures/`.
   - `src/pricing/`: per-request USD from `config/pricing.yaml`.
   - `src/docker.ts`, `src/proxy.ts`, `docker/`: the container and egress boundary.
   - `src/forge.ts`: the run's Forgejo (the agents' shared space): containers, accounts, agent logins, notification counts.

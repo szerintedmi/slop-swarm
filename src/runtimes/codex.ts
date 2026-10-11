@@ -202,6 +202,7 @@ export function leanFlags(instructionsFile: string): string[] {
 
 export const codexAdapter: RuntimeAdapter = {
   runtime: "codex",
+  maxTurnsBy: "tool_calls",
 
   // Codex has no max-turns flag: CommandOptions.maxTurns is ignored, the controller enforces timeout + budget.
   // `resume` is a subcommand, so all flags go after it.

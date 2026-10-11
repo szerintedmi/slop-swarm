@@ -18,11 +18,19 @@ Let an agent run any OpenRouter model (open models first: GLM, DeepSeek, Kimi, Q
 
 ## 1. pi runtime
 
-1. **Spike first** (in the agent image, real key, a few cents): run pi headless against `z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash` through the egress proxy. Check: the literal model string reaches OpenRouter (pi's `--model` fuzzy-matches its catalogue; a `models.json` entry under `providers.openrouter.models` may be needed); `message_end` usage and `responseId` shape; session resume with `--session-id`; offline/telemetry off; nothing blocked or hanging on the allowlist. Save a scrubbed fixture (`test/fixtures/pi-*.jsonl`, keep token counts).
-2. `docker/agent.Dockerfile`: install pinned pi (Node ≥ 22.19; bump the base image if needed). Label the version.
-3. `src/runtimes/pi.ts`: `buildCommand` (`--mode json`, `--system-prompt <file>`, `--session-id`, `--session-dir` on the runtime mount, `--tools read,bash,edit,write`, no extensions/skills/MCP, offline), `containerEnv`, a parser (assistant text, tool calls/results, reasoning; usage from `message_end`, upserted by `responseId` because `message_update` usage is cumulative; compaction usage counted too), `finalizeUsage` from pi's session file. Split lines on LF only.
-4. **Max turns:** pi has no flag. The controller counts turns from the stream and stops the container, like the budget kill.
-5. `Runtime` gains `pi`; `config.ts` accepts it. Fixture tests like the Claude/Codex ones.
+Done (pi 1.1.0).
+
+1. ✅ **Spike** (in the agent image through the egress proxy, real key, under a cent). Found:
+   - The literal model string reaches OpenRouter and the preset applies (the generation record has a `preset_id`). pi warns "not found … using custom model id" and builds the model from the provider's *default* model's metadata (Kimi's), whose `max_tokens` (943,717) some of the preset's providers reject with a 400. So the controller writes `models.json` for pi agents with an explicit entry per model (§2: from the OpenRouter catalogue, `maxTokens` capped).
+   - `message_end` usage as documented: `input` excludes `cacheRead`; `reasoning` is inside `output`; `responseId` is the `gen-…` id. `message_update.usage` has no id and stays 0 until the end, so only `message_end` is used. pi exits 0 even when every retry failed: the parser decides from the last stop reason.
+   - Caching: GLM via the preset caches implicitly (`cacheRead` on the next request, `cacheWrite` 0); no `cacheControlFormat` needed.
+   - Resume with `--session-id` works (same session file, earlier context cached). New sessions use pi's own id from the `session` header.
+   - With `--offline` and `PI_TELEMETRY=0` only `openrouter.ai` is contacted. The wake prompt overhead with the real seed is ~1.1K tokens.
+   - Fixtures: `test/fixtures/pi-hi.jsonl`, `pi-resume-wake2.jsonl`, `pi-session.jsonl`, `pi-error.jsonl`.
+2. ✅ `docker/agent.Dockerfile`: pinned pi (node:22 has 22.23), labelled, `PI_OFFLINE`/`PI_TELEMETRY=0` set.
+3. ✅ `src/runtimes/pi.ts`: command, env (`PI_CODING_AGENT_DIR=/runtime/pi`, sessions in `/runtime/sessions`), parser, `finalizeUsage` from the session file.
+4. ✅ **Max turns:** the parser emits `turn_start`; the controller stops the wake past `max_turns` (adapter `maxTurnsBy: "turns"`; Codex is `"tool_calls"`).
+5. ✅ `Runtime` gains `pi`; `config.ts` accepts it. Fixture tests in `test/runtimes.test.ts`.
 
 ## 2. OpenRouter wiring
 
@@ -42,6 +50,7 @@ Let an agent run any OpenRouter model (open models first: GLM, DeepSeek, Kimi, Q
 
 ## Not verified yet
 
-- pi passes `…@preset/…` through unchanged (spike, §1.1).
-- OpenRouter's Anthropic-style caching for GLM via pi (`compat.cacheControlFormat`).
+- ~~pi passes `…@preset/…` through unchanged~~ (yes, with a `models.json` entry; §1.1).
+- ~~OpenRouter's Anthropic-style caching for GLM via pi~~ (not needed: GLM caches implicitly; §1.1). Models that need explicit `cache_control` (Anthropic, some Gemini) aren't covered yet.
+- Compaction usage: parsed from `compaction_end` and the session file's `compaction` entries, tested on a synthetic stream only.
 - Exa `costDollars` equals the bill.

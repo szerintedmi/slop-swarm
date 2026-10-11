@@ -77,7 +77,7 @@ export async function dockerKillLabelled(filter: { runId?: string } = {}): Promi
   return names;
 }
 
-export async function imageInfo(image: string): Promise<{ digest: string; claude?: string; codex?: string } | null> {
+export async function imageInfo(image: string): Promise<{ digest: string; claude?: string; codex?: string; pi?: string } | null> {
   const r = await run(["docker", "image", "inspect", image, "--format", "{{json .}}"]);
   if (r.code !== 0) return null;
   const info = JSON.parse(r.stdout) as { Id: string; RepoDigests?: string[]; Config?: { Labels?: Record<string, string> } };
@@ -86,5 +86,6 @@ export async function imageInfo(image: string): Promise<{ digest: string; claude
     digest: info.RepoDigests?.[0] ?? info.Id,
     claude: labels["org.slopswarm.claude-code"],
     codex: labels["org.slopswarm.codex"],
+    pi: labels["org.slopswarm.pi"],
   };
 }

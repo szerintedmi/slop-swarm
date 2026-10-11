@@ -80,7 +80,7 @@ export function parseAgent(raw: unknown, defaultBudget: number, source: string):
   if (name.includes("--")) throw new ConfigError(`${source}.name: must not contain "--"`);
   return {
     name,
-    runtime: oneOf(a.runtime, `${source}.runtime`, ["claude", "codex"] as const),
+    runtime: oneOf(a.runtime, `${source}.runtime`, ["claude", "codex", "pi"] as const),
     model: str(a.model, `${source}.model`),
     effort: oneOf(a.effort ?? "medium", `${source}.effort`, ["low", "medium", "high"] as const),
     budgetUsd: a.budget_usd === undefined ? defaultBudget : num(a.budget_usd, `${source}.budget_usd`),

@@ -225,7 +225,7 @@ const commands: Record<string, (args: string[]) => Promise<void> | void> = {
     const info = await imageInfo(AGENT_IMAGE);
     if (!info) die(`image ${AGENT_IMAGE} could not be built`);
     const db = openDb();
-    const runId = createRun(db, cfg, { cliVersions: { claude: info.claude, codex: info.codex }, imageDigest: info.digest });
+    const runId = createRun(db, cfg, { cliVersions: { claude: info.claude, codex: info.codex, pi: info.pi }, imageDigest: info.digest });
     db.close();
     console.log(`run ${runId} started (${cfg.agents.map((a) => a.name).join(", ")})`);
     await runController(runId, cfg, port, fport);

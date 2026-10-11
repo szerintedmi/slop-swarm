@@ -9,7 +9,7 @@ import { forgeEnv, forgeHost, forgeUrl, type ForgeApi } from "../forge.ts";
 import { githubEnv, writeGithubLogin } from "../github.ts";
 import { computeCost, type PricingTable } from "../pricing/index.ts";
 import { getAdapter } from "../runtimes/index.ts";
-import type { AgentEvent, CostBreakdown, RequestUsage, RuntimeAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
+import type { AgentEvent, CostBreakdown, RequestUsage, Runtime, RuntimeAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
 import { isDepleted, overLimit, wakeLimit, agentRemaining } from "./budget.ts";
 import type { Repo } from "./repo.ts";
 import { fillSeed, wakeNote, SYSTEM_PROMPT_FILE } from "./run.ts";
@@ -49,7 +49,7 @@ export interface WakeDeps {
   startProcess?: (argv: string[], stderrPath: string) => ProcessHandle;
   /** Kill the wake's container; injectable for tests. */
   killContainer?: (name: string) => Promise<void>;
-  adapterFor?: (runtime: "claude" | "codex") => RuntimeAdapter;
+  adapterFor?: (runtime: Runtime) => RuntimeAdapter;
   now?: () => number;
 }
 
@@ -336,7 +336,11 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
           toolCalls++;
           repo.event({ agent: a.name, wake_id: wakeId, kind: "tool_call", name: e.name, detail: short(e.args), ok: null });
           // Codex has no --max-turns flag; enforce the limit on tool calls (plan §6).
-          if (a.runtime === "codex" && toolCalls > cfg.budgets.perWake.maxTurns) kill("max_turns");
+          if (adapter.maxTurnsBy === "tool_calls" && toolCalls > cfg.budgets.perWake.maxTurns) kill("max_turns");
+          break;
+        case "turn_start":
+          // pi has none either; it reports each assistant turn.
+          if (adapter.maxTurnsBy === "turns" && e.n > cfg.budgets.perWake.maxTurns) kill("max_turns");
           break;
         case "tool_result":
           if (!e.ok) repo.event({ agent: a.name, wake_id: wakeId, kind: "tool_result", name: e.id, detail: short(e.summary), ok: 0 });

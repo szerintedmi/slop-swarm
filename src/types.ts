@@ -1,7 +1,7 @@
 // Shared types. The internal event stream is modelled on ACP's `session/update`
 // (tool_call / message / usage / turn_end) so an ACP adapter can slot in later (plan §8).
 
-export type Runtime = "claude" | "codex";
+export type Runtime = "claude" | "codex" | "pi";
 export type Effort = "low" | "medium" | "high";
 
 export type AgentStatus = "active" | "sleeping" | "waking" | "paused" | "depleted" | "failed";
@@ -52,6 +52,8 @@ export type AgentEvent =
   | { kind: "tool_call"; id: string; name: string; args: string }
   | { kind: "tool_result"; id: string; ok: boolean; summary: string }
   | { kind: "usage"; usage: RequestUsage }
+  /** One assistant turn started (pi); the controller counts these for runtimes without a max-turns flag. */
+  | { kind: "turn_start"; n: number }
   | {
       kind: "turn_end";
       /** Normalised: completed | max_turns | error */
@@ -104,6 +106,11 @@ export interface RuntimeAdapter {
   readonly runtime: Runtime;
   /** True when `turn_end.reportedCostUsd` accumulates over a resumed session (Claude's total_cost_usd). */
   readonly reportedCostIsCumulative?: boolean;
+  /**
+   * How the controller enforces budgets.per_wake.max_turns for a CLI without a flag for it: by tool calls
+   * (Codex) or by `turn_start` events (pi). Absent = the CLI enforces it (`maxTurns` in CommandOptions).
+   */
+  readonly maxTurnsBy?: "tool_calls" | "turns";
   /** argv to run inside the container (cwd = /home/agent). */
   buildCommand(o: CommandOptions): string[];
   /** Extra container env, e.g. CLAUDE_CONFIG_DIR / CODEX_HOME pointing at the runtime mount. */

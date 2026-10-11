@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE TABLE IF NOT EXISTS agents (
   run_id          TEXT NOT NULL REFERENCES runs(id),
   name            TEXT NOT NULL,
-  runtime         TEXT NOT NULL,            -- claude | codex
+  runtime         TEXT NOT NULL,            -- claude | codex | pi
   model           TEXT NOT NULL,
   effort          TEXT NOT NULL,
   budget_usd      REAL NOT NULL,

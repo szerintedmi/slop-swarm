@@ -3,6 +3,7 @@ import { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import type { Runtime } from "../types.ts";
 import schemaSql from "./schema.sql" with { type: "text" };
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -57,7 +58,7 @@ export interface RunRow {
 export interface AgentRow {
   run_id: string;
   name: string;
-  runtime: "claude" | "codex";
+  runtime: Runtime;
   model: string;
   effort: string;
   budget_usd: number;

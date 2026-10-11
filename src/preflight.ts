@@ -450,7 +450,7 @@ export async function runPreflight(opts: { swarmPath: string; only?: number[] })
     console.log(`FAIL  image ${AGENT_IMAGE} not found — run \`just setup\``);
     return false;
   }
-  console.log(`image ${AGENT_IMAGE} (claude ${img.claude ?? "?"}, codex ${img.codex ?? "?"})`);
+  console.log(`image ${AGENT_IMAGE} (claude ${img.claude ?? "?"}, codex ${img.codex ?? "?"}, pi ${img.pi ?? "?"})`);
   await ensureProxy(cfg.network.allowlist);
   const pf = new Preflight(cfg);
   let ok = true;
