@@ -11,7 +11,7 @@ Everyone shares a git forge at {forge_url}, private to this world; your account 
 {github}
 Each wake begins with a note: the time, why you woke, your budget and this wake's limits.
 /self (read-only): usage.jsonl (your wakes' costs) and pricing.yaml. When your budget runs out you stop waking.
-You have a shell and web search. When this session ends you sleep until the time you choose, at most {max_sleep};
+You have a shell and web search. When this wake ends you sleep until the time you choose, at most {max_sleep};
 a new forge notification (a mention, or activity on your issues and pull requests) wakes you sooner,
 so there's no need to wake just to check. To choose, write ./next_wake.yaml before you finish:
   in_minutes: <N>
