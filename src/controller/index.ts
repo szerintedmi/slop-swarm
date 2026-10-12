@@ -37,6 +37,8 @@ export class Controller {
   private swarmUsd: number;
   private readonly pricing: PricingTable;
   private readonly running = new Map<string, WakeHandle>();
+  /** OpenRouter cost cross-checks still running after their wakes ended (they hold no scheduler slot). */
+  private readonly vendorChecks = new Set<Promise<void>>();
   private readonly pauseAfterWake = new Set<string>();
   private stopping = false;
   private killed = false;
@@ -97,7 +99,10 @@ export class Controller {
 
   /** Resolves when every running wake has finished (tests, shutdown). */
   async whenIdle(): Promise<void> {
-    while (this.running.size) await Promise.all([...this.running.values()].map((h) => h.done));
+    while (this.running.size || this.vendorChecks.size) {
+      await Promise.all([...this.running.values()].map((h) => h.done));
+      await Promise.all(this.vendorChecks);
+    }
   }
 
   /** Clean up after a controller crash: close wakes left open and bill what they used. */
@@ -125,6 +130,7 @@ export class Controller {
           streamed: [...streamed.values()],
           stdoutLines: lines,
           wakeStartedAt: w.started_at,
+          billedRequestIds: this.repo.billedRequestIds(a.name, w.id),
           previousWakeStdoutLines: w.resumed ? previousSessionLines(this.repo.finishedWakes(a.name), sessionId) : undefined,
         });
       } catch {
@@ -322,6 +328,10 @@ export class Controller {
       this.log(`wake ${a.name}#${a.wake_count + 1} (${trigger})`);
       void h.done.then((o) => {
         this.log(`done ${a.name}#${a.wake_count + 1}: ${o.exitReason}, $${o.costUsd.toFixed(4)}`);
+        if (o.vendorCheck) {
+          const check = o.vendorCheck.finally(() => this.vendorChecks.delete(check));
+          this.vendorChecks.add(check);
+        }
         this.onWakeDone(h);
       });
     }
@@ -353,5 +363,7 @@ export class Controller {
       this.wakeup = null;
     }
     await this.polling;
+    // Bounded (VENDOR_CHECK_MS); their numbers land in the report.
+    await Promise.all(this.vendorChecks);
   }
 }

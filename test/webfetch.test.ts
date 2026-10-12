@@ -22,7 +22,7 @@ import {
   type WebfetchLimits,
 } from "../docker/search/webfetch.ts";
 import { loadSwarm, parseSwarm, type SwarmConfig } from "../src/config.ts";
-import { Controller } from "../src/controller/index.ts";
+import { Controller, type ControllerOptions } from "../src/controller/index.ts";
 import { createRun } from "../src/controller/run.ts";
 import type { ProcessHandle } from "../src/controller/wake.ts";
 import { agentDirs, openDb } from "../src/db/index.ts";
@@ -563,7 +563,11 @@ const FIXTURES: Record<string, string> = {
 };
 const T0 = Date.UTC(2026, 9, 11, 12, 0, 0);
 
-async function runWakes(cfg: SwarmConfig, during?: (agent: string, runId: string) => Promise<void>) {
+async function runWakes(
+  cfg: SwarmConfig,
+  during?: (agent: string, runId: string) => Promise<void>,
+  vendorCosts: NonNullable<ControllerOptions["wakeDeps"]>["vendorCosts"] = async () => new Map(),
+) {
   const db = openDb(":memory:");
   const pricingYaml = readFileSync(base.paths.pricing, "utf8").replace(
     /^models:\n/m,
@@ -595,7 +599,7 @@ async function runWakes(cfg: SwarmConfig, during?: (agent: string, runId: string
     forge: { unread: async () => 0 },
     log: () => {},
     now: () => T0,
-    wakeDeps: { startProcess, killContainer: async () => {}, vendorCosts: async () => new Map() },
+    wakeDeps: { startProcess, killContainer: async () => {}, vendorCosts },
   });
   ctl.tick();
   await ctl.whenIdle();
@@ -650,6 +654,25 @@ describe("wakes", () => {
     expect(report).toContain("## Web fetch (relay)");
     expect(report).toContain("1 fetch(es): 1 answered (10 bytes, 0 saved raw), 0 blocked, 0 failed. By agent: bramble 1.");
     expect(report).toContain("Top hosts: site.example.com 1.");
+  });
+
+  test("a relay search in an OpenRouter wake: billed, and the cross-check still sets the vendor cost", async () => {
+    const r = await runWakes(
+      config(undefined),
+      async (agent, runId) => {
+        if (agent !== "fern") return;
+        const d = runSearchDirs(runId);
+        const tokens = JSON.parse(readFileSync(d.tokensFile, "utf8")) as Record<string, { agent: string; wake: number }>;
+        const wake = Object.values(tokens).find((v) => v.agent === "fern")!.wake;
+        const entry = { id: "s1", ts: new Date(T0).toISOString(), agent, wake, query: "q", params: {}, type: "auto", results: 1, pages: {}, exa_cost_usd: 0.007, latency_ms: 1, status: 200, error: null };
+        writeFileSync(d.logFile, JSON.stringify(entry) + "\n");
+      },
+      async (ids) => new Map(ids.map((id) => [id, { costUsd: 0.00003, provider: "StreamLake" }])),
+    );
+    const w = r.db.query<{ id: number; reported_cost_usd: number | null }, []>("SELECT id, reported_cost_usd FROM wakes WHERE agent = 'fern'").get()!;
+    const models = r.db.query<{ model: string }, [number]>("SELECT model FROM requests WHERE wake_id = ? ORDER BY seq").all(w.id).map((q) => q.model);
+    expect(models).toEqual(["z-ai/glm-5.3-flash", "exa-search"]);
+    expect(w.reported_cost_usd).toBeCloseTo(0.00003, 12);
   });
 
   test("webfetch off: no block, and only relay-search agents get a token", async () => {

@@ -86,6 +86,16 @@ export class Repo {
     })();
   }
 
+  /** Request ids billed to the agent's other wakes (a resumed session file repeats them). */
+  billedRequestIds(agent: string, exceptWakeId: number): Set<string> {
+    return new Set(
+      this.db
+        .query<{ request_id: string }, [string, string, number]>("SELECT request_id FROM requests WHERE run_id = ? AND agent = ? AND wake_id != ?")
+        .all(this.runId, agent, exceptWakeId)
+        .map((r) => r.request_id),
+    );
+  }
+
   /** The vendor's charged cost and serving provider for a wake's requests (by request id). */
   setVendorCosts(wakeId: number, costs: Map<string, { costUsd: number; provider: string | null }>): void {
     const q = this.db.query("UPDATE requests SET vendor_cost_usd = ?, vendor_provider = ? WHERE wake_id = ? AND request_id = ?");

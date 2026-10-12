@@ -142,6 +142,18 @@ describe("generation cost lookup", () => {
     expect(calls["gen-gone"]).toBe(3);
     expect(calls["gen-bad"]).toBe(1);
   });
+
+  test("generation lookups stop at the deadline: what resolved by then is kept", async () => {
+    let t = 0;
+    const fetchFn = async (url: string) => {
+      t += 10_000; // each lookup takes 10 s
+      const id = new URL(url).searchParams.get("id")!;
+      return id === "gen-a" ? Response.json({ data: { total_cost: 0.001, provider_name: "P" } }) : new Response("", { status: 404 });
+    };
+    const out = await generationCosts(["gen-a", "gen-b", "gen-c", "gen-d"], "k", { fetchFn: fetchFn as unknown as typeof fetch, sleep: async () => {}, now: () => t, deadlineMs: 25_000 });
+    expect([...out.keys()]).toEqual(["gen-a"]);
+    expect(t).toBe(30_000);
+  });
 });
 
 describe("agent config", () => {

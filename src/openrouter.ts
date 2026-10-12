@@ -209,19 +209,26 @@ export interface VendorCost {
 export async function generationCosts(
   ids: string[],
   key: string,
-  opts: { fetchFn?: Fetch; sleep?: (ms: number) => Promise<unknown>; attempts?: number; delayMs?: number } = {},
+  opts: { fetchFn?: Fetch; sleep?: (ms: number) => Promise<unknown>; attempts?: number; delayMs?: number; deadlineMs?: number; now?: () => number } = {},
 ): Promise<Map<string, VendorCost>> {
-  const { fetchFn = fetch, sleep = Bun.sleep, attempts = 4, delayMs = 2000 } = opts;
+  const { fetchFn = fetch, sleep = Bun.sleep, attempts = 4, delayMs = 2000, now = Date.now } = opts;
+  // Past the deadline, the ids still pending are given up (reported as not found).
+  const deadline = opts.deadlineMs === undefined ? Infinity : now() + opts.deadlineMs;
   const out = new Map<string, VendorCost>();
   let pending = [...new Set(ids)];
   for (let i = 0; i < attempts && pending.length; i++) {
-    if (i > 0) await sleep(delayMs * i);
+    if (i > 0) {
+      if (now() + delayMs * i >= deadline) break;
+      await sleep(delayMs * i);
+    }
     const retry: string[] = [];
     for (const id of pending) {
+      const left = deadline - now();
+      if (left <= 0) return out;
       try {
         const r = await fetchFn(`${OPENROUTER_API}/generation?id=${encodeURIComponent(id)}`, {
           headers: { Authorization: `Bearer ${key}` },
-          signal: AbortSignal.timeout(15_000),
+          signal: AbortSignal.timeout(Math.min(15_000, left)),
         });
         if (r.status === 404 || r.status === 429 || r.status >= 500) {
           retry.push(id);

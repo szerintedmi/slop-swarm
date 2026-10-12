@@ -101,6 +101,11 @@ export interface FinalizeContext {
   /** Unix ms when the wake started; session-file records older than this belong to earlier (resumed) wakes. */
   wakeStartedAt?: number;
   /**
+   * Request ids already billed to earlier wakes of the agent. A resumed session's file also holds those wakes'
+   * records, and the timestamp cut has clock slack, so adapters that read session files skip these ids.
+   */
+  billedRequestIds?: ReadonlySet<string>;
+  /**
    * Raw stdout of the previous wake of the same session, when this wake resumed it. Both CLIs report
    * some totals cumulatively over a resumed session (Claude `result.modelUsage` / `total_cost_usd`,
    * Codex `turn.completed.usage`); adapters subtract the previous wake's totals to get this wake's own.

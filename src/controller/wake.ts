@@ -26,6 +26,8 @@ export const RETRY_AFTER_MS = 60_000;
 const LIVE_POLL_MS = 5_000;
 const KILL_RETRY_MS = 1_000;
 const ARGS_MAX = 200;
+/** Total time the OpenRouter cost cross-check may take after a wake. */
+const VENDOR_CHECK_MS = 90_000;
 
 export interface ProcessHandle {
   stdout: ReadableStream<Uint8Array>;
@@ -73,6 +75,8 @@ export interface WakeOutcome {
   wakeId: number;
   exitReason: WakeExitReason;
   costUsd: number;
+  /** The OpenRouter cost cross-check, still running after the wake (and its scheduler slot) ended. */
+  vendorCheck?: Promise<void>;
 }
 
 function defaultStart(argv: string[], stderrPath: string, env: Record<string, string | undefined>): ProcessHandle {
@@ -314,19 +318,25 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
 
     /**
      * OpenRouter's charged cost and serving provider per request, beside ours (which stays authoritative). The
-     * wake's vendor-reported cost is set only when every request resolved. Never fails the wake.
+     * wake's vendor-reported cost is set only when every model request resolved. Runs after the wake has released
+     * its slot, bounded by VENDOR_CHECK_MS; never fails the wake.
      */
     const crossCheck = async (keyEnv: string, requestIds: string[]) => {
       const ids = requestIds.filter((id) => id.startsWith("gen-"));
       const key = process.env[keyEnv];
       if (!ids.length || !key) return;
       try {
-        const found = await (deps.vendorCosts ?? ((i: string[], k: string) => generationCosts(i, k)))(ids, key);
+        const found = await (deps.vendorCosts ?? ((i: string[], k: string) => generationCosts(i, k, { deadlineMs: VENDOR_CHECK_MS })))(ids, key);
         repo.setVendorCosts(wakeId, found);
-        if (found.size === requestIds.length) repo.updateWake(wakeId, { reported_cost_usd: [...found.values()].reduce((s, v) => s + v.costUsd, 0) });
+        if (ids.length === requestIds.length && found.size === ids.length)
+          repo.updateWake(wakeId, { reported_cost_usd: [...found.values()].reduce((s, v) => s + v.costUsd, 0) });
         if (found.size < ids.length) repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "openrouter_cost", detail: `${ids.length - found.size} of ${ids.length} generation(s) not found`, ok: 0 });
       } catch (err) {
-        repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "openrouter_cost", detail: short(String(err)), ok: 0 });
+        try {
+          repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "openrouter_cost", detail: short(String(err)), ok: 0 });
+        } catch {
+          /* the run may have closed its database meanwhile */
+        }
       }
     };
 
@@ -340,8 +350,9 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     let live: RequestUsage[] = [];
     let lastPersist = 0;
 
+    const billed = repo.billedRequestIds(a.name, wakeId);
     const finalize = () =>
-      adapter.finalizeUsage({ runtimeDir: dirs.runtime, sessionId, streamed: [...streamed.values()], stdoutLines, wakeStartedAt: startedAt, previousWakeStdoutLines: previousLines });
+      adapter.finalizeUsage({ runtimeDir: dirs.runtime, sessionId, streamed: [...streamed.values()], stdoutLines, wakeStartedAt: startedAt, billedRequestIds: billed, previousWakeStdoutLines: previousLines });
 
     const evaluate = (force = false) => {
       const usages = live.length >= streamed.size ? live : [...streamed.values()];
@@ -525,8 +536,9 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       next_trigger: nextTrigger,
     });
     repo.lifecycle("wake_end", `${exitReason}, $${total.toFixed(4)}${status !== "sleeping" ? `, now ${status}` : ""}`, a.name, wakeId);
-    if (agentCfg?.provider === "openrouter" && agentCfg.keyEnv) await crossCheck(agentCfg.keyEnv, rows.map((r) => r.u.requestId));
-    return { wakeId, exitReason, costUsd: total };
+    // Model requests only: relay searches have no generation to look up.
+    const vendorCheck = agentCfg?.provider === "openrouter" && agentCfg.keyEnv ? crossCheck(agentCfg.keyEnv, llm.rows.map((r) => r.u.requestId)) : undefined;
+    return { wakeId, exitReason, costUsd: total, vendorCheck };
   })().catch((err) => {
     disarm();
     clearInterval(poll);

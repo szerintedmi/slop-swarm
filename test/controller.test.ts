@@ -535,14 +535,22 @@ describe("controller", () => {
     );
     process.env.TEST_OR_KEY = "sk-test-not-real";
     const looked: string[][] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
     const vendorCosts = async (ids: string[], key: string) => {
       expect(key).toBe("sk-test-not-real");
       looked.push(ids);
+      await gate;
       return new Map(ids.map((id) => [id, { costUsd: 0.00001, provider: "StreamLake" }]));
     };
     // Two assistant turns (a tool call, then the reply): one more than max_turns.
     const h = harness(cfg, () => readFileSync("test/fixtures/pi-resume-wake2.jsonl", "utf8"), { pricingYaml, wakeDeps: { vendorCosts } });
     h.ctl.tick();
+    while (!looked.length) await Bun.sleep(1);
+    await Bun.sleep(5);
+    // The lookups are still pending, but the wake has already given back its scheduler slot.
+    const runningDuringCheck = (h.ctl as unknown as { running: Map<string, unknown> }).running.size;
+    release();
     await h.ctl.whenIdle();
     delete process.env.TEST_OR_KEY;
 
@@ -559,6 +567,7 @@ describe("controller", () => {
     expect(reqs.map((r) => r.model)).toEqual(["z-ai/glm-5.3-flash", "z-ai/glm-5.3-flash"]);
     expect(w!.cost_usd).toBeCloseTo((585 * 0.15 + 768 * 0.03 + 19 * 0.5 + 34 * 0.15 + 1344 * 0.03 + 3 * 0.5) / 1e6, 12);
     expect(looked).toEqual([reqs.map((r) => r.request_id)]);
+    expect(runningDuringCheck).toBe(0);
     expect(reqs.every((r) => r.vendor_cost_usd === 0.00001 && r.vendor_provider === "StreamLake")).toBe(true);
     expect(w!.reported_cost_usd).toBeCloseTo(0.00002, 12);
     // The agent sees its model's price under the slug.

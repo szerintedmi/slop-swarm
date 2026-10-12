@@ -117,7 +117,7 @@ function sessionFiles(runtimeDir: string, sessionId: string): string[] {
   return findFiles(join(runtimeDir, PI_SESSION_SUBDIR), (name) => name.endsWith(`_${sessionId}.jsonl`)).sort();
 }
 
-/** Records written before the wake started belong to earlier wakes of a resumed session. */
+/** Records written before the wake started belong to earlier wakes of a resumed session (ids already billed are skipped too). */
 const CLOCK_SLACK_MS = 5000;
 
 /**
@@ -208,7 +208,10 @@ export const piAdapter: HarnessAdapter = {
     const streamed = ctx.streamed.map((u) => ({ ...u }));
     if (!ctx.sessionId) return streamed;
     const model = ctx.streamed[0]?.model ?? "unknown";
-    const fromSession = sessionFiles(ctx.runtimeDir, ctx.sessionId).flatMap((f) => usageFromSession(readJsonLines(f), model, ctx.wakeStartedAt));
+    const billed = ctx.billedRequestIds;
+    const fromSession = sessionFiles(ctx.runtimeDir, ctx.sessionId)
+      .flatMap((f) => usageFromSession(readJsonLines(f), model, ctx.wakeStartedAt))
+      .filter((u) => !billed?.has(u.requestId));
     if (fromSession.length === 0) return streamed;
     const known = new Set(fromSession.map((u) => u.requestId));
     // Streamed compaction ids (`compaction-N`) have no session-file twin by id; the session's own record wins.

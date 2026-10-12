@@ -392,6 +392,11 @@ describe("pi adapter", () => {
     expect(all.map((u) => u.requestId)).toEqual(["gen-1791754175-7XX88bo8xF7c2YEBkz9E", ...streamed.map((u) => u.requestId)]);
     const wake2 = await pi.finalizeUsage({ runtimeDir: dir, sessionId: SID, streamed, stdoutLines: stdout, wakeStartedAt: Date.parse("2026-10-11T21:29:45Z") });
     expect(wake2.map(({ ts: _ts, ...u }) => u)).toEqual(streamed.map(({ ts: _ts, ...u }) => u));
+    // Resumed within the clock slack of the previous wake's last request: its billed ids are skipped.
+    const quick = { runtimeDir: dir, sessionId: SID, streamed, stdoutLines: stdout, wakeStartedAt: Date.parse("2026-10-11T21:29:38Z") };
+    expect((await pi.finalizeUsage(quick)).map((u) => u.requestId)).toContain("gen-1791754175-7XX88bo8xF7c2YEBkz9E");
+    const billed = new Set(["gen-1791754175-7XX88bo8xF7c2YEBkz9E"]);
+    expect((await pi.finalizeUsage({ ...quick, billedRequestIds: billed })).map((u) => u.requestId)).toEqual(streamed.map((u) => u.requestId));
   });
 
   test("failed requests: pi exits 0, but the wake ends in error with no billable usage (real run)", () => {
