@@ -1,14 +1,24 @@
 // YAML config loading + validation (plan §2, §5, §6).
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import type { Effort, Runtime } from "./types.ts";
+import { getAdapter } from "./harnesses/index.ts";
+import { HARNESSES, type Effort, type Harness, type SearchMode } from "./types.ts";
+
+export type ModelProvider = "native" | "openrouter";
 
 export interface AgentConfig {
   name: string;
-  runtime: Runtime;
+  harness: Harness;
+  /** For OpenRouter, the model string as sent, e.g. `z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash`. */
   model: string;
   effort: Effort;
   budgetUsd: number;
+  /** `native`: the harness's own vendor (Claude Code, Codex). `openrouter`: OpenRouter, via pi. */
+  provider: ModelProvider;
+  /** OpenRouter agents: the env var (in .env) holding the API key. Never the key itself. */
+  keyEnv?: string;
+  /** Web search: the harness's own tool (`native`) or the run's relay via `websearch` (src/search.ts). */
+  search: SearchMode;
 }
 
 export interface SwarmConfig {
@@ -33,10 +43,18 @@ export interface SwarmConfig {
   forge: { image: string; port: number; pollMs: number };
   /** The agents' public outlet: a GitHub org they all reach through one shared account. Absent = no GitHub. */
   github?: { org: string; user: string };
+  /** Agents' `webfetch <url>`: GET-only downloads of public URLs through the run's relay (src/webfetch.ts). Absent = off. */
+  webfetch?: WebfetchConfig;
   /** Absolute path of the config file and the seed/pricing files next to it. */
   paths: { swarm: string; seed: string; pricing: string; configDir: string };
   /** Raw YAML text of swarm + agents, snapshotted into the runs table. */
   snapshot: string;
+}
+
+export interface WebfetchConfig {
+  maxBytes: number;
+  timeoutMs: number;
+  maxRedirects: number;
 }
 
 export class ConfigError extends Error {}
@@ -70,6 +88,12 @@ const GITHUB_NAME_RE = /^[a-zA-Z0-9](-?[a-zA-Z0-9])*$/;
 /** Domains the GitHub outlet needs on the allowlist (suffix match: github.com covers api.github.com). */
 export const GITHUB_DOMAINS = ["github.com", "githubusercontent.com"] as const;
 
+/** OpenRouter agents read their key from this env var unless they name another (`key_env`). */
+export const DEFAULT_OPENROUTER_KEY_ENV = "OPEN_ROUTER_API_KEY";
+/** The domain OpenRouter agents need on the allowlist (API and the generation cost lookup). */
+export const OPENROUTER_DOMAIN = "openrouter.ai";
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 export const DEFAULT_FORGE_IMAGE = "codeberg.org/forgejo/forgejo:16.0.4-rootless";
 
 export function parseAgent(raw: unknown, defaultBudget: number, source: string): AgentConfig {
@@ -78,13 +102,38 @@ export function parseAgent(raw: unknown, defaultBudget: number, source: string):
   if (!AGENT_NAME_RE.test(name)) throw new ConfigError(`${source}.name: must match ${AGENT_NAME_RE}`);
   // Forgejo rejects consecutive non-alphanumerics in usernames.
   if (name.includes("--")) throw new ConfigError(`${source}.name: must not contain "--"`);
+  // `runtime:` is the old name of `harness:`, accepted only so config snapshots of earlier runs still load.
+  if (a.harness !== undefined && a.runtime !== undefined) throw new ConfigError(`${source}: give harness only (runtime is its old name)`);
+  const harness = oneOf(a.harness ?? a.runtime, `${source}.harness`, HARNESSES);
+  const provider = oneOf(a.provider ?? "native", `${source}.provider`, ["native", "openrouter"] as const);
+  // Claude Code and Codex stay on their own vendors; pi runs OpenRouter models only (for now).
+  if ((harness === "pi") !== (provider === "openrouter"))
+    throw new ConfigError(`${source}: harness pi goes with provider: openrouter (and only pi does, for now)`);
+  if (a.key_env !== undefined && provider !== "openrouter") throw new ConfigError(`${source}.key_env: only for provider: openrouter`);
+  const keyEnv = provider === "openrouter" ? str(a.key_env ?? DEFAULT_OPENROUTER_KEY_ENV, `${source}.key_env`) : undefined;
+  if (keyEnv !== undefined && !ENV_NAME_RE.test(keyEnv)) throw new ConfigError(`${source}.key_env: not an environment variable name`);
   return {
     name,
-    runtime: oneOf(a.runtime, `${source}.runtime`, ["claude", "codex"] as const),
+    harness,
     model: str(a.model, `${source}.model`),
     effort: oneOf(a.effort ?? "medium", `${source}.effort`, ["low", "medium", "high"] as const),
     budgetUsd: a.budget_usd === undefined ? defaultBudget : num(a.budget_usd, `${source}.budget_usd`),
+    provider,
+    ...(keyEnv !== undefined ? { keyEnv } : {}),
+    search: parseSearch(a.search, harness, `${source}.search`),
   };
+}
+
+/**
+ * `search:` against what the harness supports (its adapter's `searchModes`; the first is the default).
+ * Claude and Codex default to their own search; with `relay` their own tool is turned off. pi has none.
+ */
+function parseSearch(v: unknown, harness: Harness, field: string): SearchMode {
+  const modes = getAdapter(harness).searchModes;
+  const mode = oneOf(v ?? modes[0], field, ["native", "relay"] as const);
+  if (!modes.includes(mode))
+    throw new ConfigError(`${field}: ${harness} has no ${mode === "native" ? "native search tool" : "relay support"}; use ${modes.map((m) => `search: ${m}`).join(" or ")}`);
+  return mode;
 }
 
 /** Validate an already-parsed swarm YAML. `loadAgent(name)` returns the parsed agent YAML. */
@@ -153,8 +202,36 @@ export function parseSwarm(
     },
   };
   if (cfg.scheduler.maxSleepMs > cfg.run.maxDurationMs) throw new ConfigError("scheduler: max_sleep_min longer than run.max_duration_min");
-  if (s.github === undefined) return cfg;
-  return { ...cfg, github: parseGithub(s.github, cfg.network.allowlist) };
+  if (agents.some((a) => a.provider === "openrouter") && !onAllowlist(cfg.network.allowlist, OPENROUTER_DOMAIN))
+    throw new ConfigError(`network.allowlist needs ${OPENROUTER_DOMAIN} for the OpenRouter agents`);
+  return {
+    ...cfg,
+    ...(s.github !== undefined ? { github: parseGithub(s.github, cfg.network.allowlist) } : {}),
+    ...(s.webfetch !== undefined && s.webfetch !== false ? { webfetch: parseWebfetch(s.webfetch) } : {}),
+  };
+}
+
+/** Upper bounds keep one fetch from tying up the relay (256 MB memory, one deadline per fetch). */
+export const WEBFETCH_MAX = { mb: 100, timeoutS: 120, redirects: 10 } as const;
+
+/** `webfetch:` (an empty section takes the defaults; remove it or set `false` to turn webfetch off). */
+function parseWebfetch(raw: unknown): WebfetchConfig {
+  const w = obj(raw ?? {}, "webfetch");
+  const bounded = (v: unknown, field: string, min: number, max: number, int = false) => {
+    const n = num(v, field, { min });
+    if (n > max || (int && !Number.isInteger(n))) throw new ConfigError(`${field}: expected ${int ? "an integer" : "a number"} ${min}–${max}`);
+    return n;
+  };
+  const mb = bounded(w.max_mb ?? 20, "webfetch.max_mb", 0.001, WEBFETCH_MAX.mb);
+  return {
+    maxBytes: Math.round(mb * 1024 * 1024),
+    timeoutMs: bounded(w.timeout_s ?? 30, "webfetch.timeout_s", 1, WEBFETCH_MAX.timeoutS) * S,
+    maxRedirects: bounded(w.max_redirects ?? 5, "webfetch.max_redirects", 0, WEBFETCH_MAX.redirects, true),
+  };
+}
+
+function onAllowlist(allowlist: string[], domain: string): boolean {
+  return allowlist.some((a) => a.trim().toLowerCase().replace(/^\*?\./, "") === domain);
 }
 
 function parseGithub(raw: unknown, allowlist: string[]): { org: string; user: string } {
@@ -164,7 +241,7 @@ function parseGithub(raw: unknown, allowlist: string[]): { org: string; user: st
     if (!GITHUB_NAME_RE.test(n)) throw new ConfigError(`${field}: not a valid GitHub name`);
     return n;
   };
-  const missing = GITHUB_DOMAINS.filter((d) => !allowlist.some((a) => a.trim().toLowerCase().replace(/^\*?\./, "") === d));
+  const missing = GITHUB_DOMAINS.filter((d) => !onAllowlist(allowlist, d));
   if (missing.length) throw new ConfigError(`github: network.allowlist needs ${missing.join(", ")}`);
   return { org: name(gh.org, "github.org"), user: name(gh.user, "github.user") };
 }

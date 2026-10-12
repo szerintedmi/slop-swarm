@@ -1,6 +1,6 @@
 // Codex CLI adapter: `codex exec --json` for the live stream, the rollout file for per-request usage (plan §4.2, §8).
 import { basename, join } from "node:path";
-import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, RuntimeAdapter, StreamParser } from "../types.ts";
+import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, HarnessAdapter, StreamParser } from "../types.ts";
 import { findFiles, n, parseJsonLine, readJsonLines, short } from "./util.ts";
 
 /**
@@ -200,8 +200,10 @@ export function leanFlags(instructionsFile: string): string[] {
   ];
 }
 
-export const codexAdapter: RuntimeAdapter = {
-  runtime: "codex",
+export const codexAdapter: HarnessAdapter = {
+  harness: "codex",
+  maxTurnsBy: "tool_calls",
+  searchModes: ["native", "relay"],
 
   // Codex has no max-turns flag: CommandOptions.maxTurns is ignored, the controller enforces timeout + budget.
   // `resume` is a subcommand, so all flags go after it.
@@ -215,7 +217,8 @@ export const codexAdapter: RuntimeAdapter = {
       `model_reasoning_effort=${o.effort}`,
       "--dangerously-bypass-approvals-and-sandbox",
       "-c",
-      'web_search="live"',
+      // Agents on the relay (`search: relay`) get Codex's own web search tool turned off.
+      o.nativeSearch === false ? 'web_search="disabled"' : 'web_search="live"',
       // Reasoning summaries for the transcript. Luna at medium effort often reasons 0 tokens, so many wakes have none.
       "-c",
       'model_reasoning_summary="auto"',

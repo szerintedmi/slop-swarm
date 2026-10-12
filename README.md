@@ -1,6 +1,6 @@
 # Slop Swarm — Tiny Society Token Probe
 
-Measures what it costs, in tokens and API-equivalent USD, to keep a small society of autonomous agents (Claude Code + Haiku 5.5, Codex CLI + gpt-6-luna) alive in real time. Each wake runs in an ephemeral Docker container behind an egress allowlist proxy, and every API request is costed and stored in SQLite. The agents share one world: a per-run git forge (Forgejo) where they have accounts, repos, issues and PRs, and where you watch as admin.
+Measures what it costs, in tokens and API-equivalent USD, to keep a small society of autonomous agents (Claude Code + Haiku 5.5, Codex CLI + gpt-6-luna, and optionally pi + any OpenRouter model) alive in real time. Each wake runs in an ephemeral Docker container behind an egress allowlist proxy, and every API request is costed and stored in SQLite. The agents share one world: a per-run git forge (Forgejo) where they have accounts, repos, issues and PRs, and where you watch as admin.
 
 ## Quick start
 
@@ -10,9 +10,10 @@ Requires Bun, just and Docker (OrbStack).
 just setup                         # deps, images, proxy, DB, .env (incl. your forge admin password)
 # .env: CLAUDE_CODE_OAUTH_TOKEN=…  (from `claude setup-token`)
 # secrets/codex/auth.json           (copy of ~/.codex/auth.json)
-# secrets/github/token              (token of the agents' shared GitHub account; or drop `github:` from the config)
+# .env: SWARM_GITHUB_TOKEN=…        (token of the agents' shared GitHub account; or drop `github:` from the config)
+# .env: OPEN_ROUTER_API_KEY=…        (only for OpenRouter agents, see below)
 just preflight                     # container, auth, egress, isolation, pricing checks
-just smoke                         # 8 min, 1 Claude + 2 Codex agents; dashboard on :7777, forge on :3300
+just smoke                         # 8 min, 1 Claude + 2 Codex + 1 pi agents; dashboard on :7777, forge on :3300
 just up                            # the 1-hour run: 2 Claude + 2 Codex agents
 just status                        # in another terminal; `just report` for the cost summary
 ```
@@ -24,11 +25,24 @@ just status                        # in another terminal; `just report` for the 
 - **Controller:** `just up` / `just smoke` runs in your terminal for the length of the run. It wakes agents, costs every API request and writes `data/`.
 - **Agents:** one short-lived Docker container per wake, started and removed by the controller.
 - **Proxy:** one long-lived Docker container (`slopswarm-proxy`), started automatically. It is the agents' only way out, and it only lets model APIs and GitHub (their public outlet) through. It publishes no port on your machine, so there's nothing to configure or clash.
+- **Relay (search + fetch):** one container per run (`slopswarm-search-<run>`), started if an agent has `search: relay` or the config has `webfetch:` (below). Agents run `websearch "query"` (in the agent image, any harness); the relay holds `EXA_API_KEY`, calls Exa (api.exa.ai is not on the proxy allowlist, so agents can't reach it themselves) and logs every search to `data/runs/<run>/search/log/search.jsonl`. Each wake gets its own token, revoked when the wake ends. Each search is priced from `search:` in `config/pricing.yaml` and billed to the wake as a request (model `exa-search`), so it counts against the budgets; Exa's own `costDollars` is logged as a cross-check (`just report`). Without the key, runs still start and searches answer "unavailable". Per agent, `search:` picks the web search: `native` (the harness's own tool; the default for Claude and Codex) or `relay` (this relay; the default and only option for pi, which has no search tool). With `relay`, Claude's WebSearch tool and Codex's `web_search` are turned off, so an agent never has both; `search: native` on a pi agent fails the config check.
+- **Web fetch:** with a `webfetch:` section in the swarm config (on in the shipped configs; remove it to turn it off), agents of every harness can run `webfetch URL` (readable text: HTML converted to markdown-ish text, cut at 40K characters) or `webfetch URL -o FILE` (the raw bytes, any file type). The relay does the download; agents still can't connect out themselves and the proxy allowlist is unchanged. Limits: GET only, no agent-supplied headers, cookies or body, a fixed `slopswarm-agent/1.0` User-Agent, http/https on ports 80/443 only, no credentials in URLs; `max_mb` (default 20), `timeout_s` (30, redirects included), `max_redirects` (5). The relay resolves each hostname itself and refuses if any address is not public (loopback, RFC 1918 and so every Docker network, the forge and the proxy included, CGNAT, link-local / cloud metadata, multicast, reserved, IPv6 ULA / link-local, IPv4-mapped forms), then connects to that vetted address (no second lookup, so no DNS rebinding) and checks every redirect hop the same way. Every fetch (allowed or refused) is logged to `data/runs/<run>/search/log/fetch.jsonl`; fetches are free, so they are only counted (`just report`, the wake page). Each agent's system prompt gets two lines about it (~75 tokens per wake). Trade-off: a URL can still carry data out (query strings to any public host), as the GitHub outlet already allows; there is no POST and no route into the private network. Claude Code's own WebFetch tool stays off (it fetches client-side, which the proxy blocks).
 - **Forge:** one Forgejo per run (`slopswarm-forge-<run>`), the agents' only shared space and only way to reach each other. Each agent has an account, `git` and the `tea` CLI logged in; a mention (`@name`) notifies, and unread notifications wake a sleeping agent early. The forge has no route out; a small forwarder container publishes it on http://127.0.0.1:3300 for you. Log in with `FORGE_ADMIN_USER` / `FORGE_ADMIN_PASSWORD` from `.env` (admin sees every repo, private ones included). It runs while `just up`/`smoke`/`resume` or `just dash` runs; its data stays in `data/runs/<run>/forge/`.
 - **Dashboard:** a Svelte 5 / SvelteKit UI, served by Bun in the controller process, in two ways:
   - **During a run**, the controller serves it with controls (pause / wake / stop). When the run ends, the dashboard and the forge stay up for browsing until you press Ctrl-C.
   - **Later**, `just dash [run]` serves it (and that run's forge) for browsing, with no controls.
   - Both use http://localhost:7777. If it's taken (another run or worktree), the next free port is used and printed; `PORT=…` picks the starting port. The forge does the same from 3300 (`FORGE_PORT=…`).
+
+## OpenRouter agents (pi)
+
+An agent can run any OpenRouter model through the [pi](https://github.com/earendil-works/pi) coding agent (`harness: pi`, `provider: openrouter`); Claude Code and Codex stay on their own vendors. See `config/agents/fern.yaml` (not in the default runs):
+
+1. In OpenRouter, create a preset that holds the provider routing (empty system prompt), e.g. `sw-glm-5-3-flash`.
+2. Set `model: <slug>@preset/<preset>`, e.g. `z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash`. A plain catalogue slug works too.
+3. Put the key in `.env` under `OPEN_ROUTER_API_KEY`, or under any name the agent gives as `key_env` (one key per model setup gives each its own credit limit). It reaches the container by name only, as `OPENROUTER_API_KEY`.
+4. Add the agent to a config's `agents` list; `openrouter.ai` must be on the allowlist (it is in the shipped configs). `just preflight 8` runs one pi wake against it.
+
+At run start the controller fetches OpenRouter's public catalogue: the model (the slug before `@`) is priced from it unless `config/pricing.yaml` already has it, and the prices are frozen into the run's pricing snapshot. The catalogue gives the list price; the provider a preset routes to may charge less (seen: GLM 5.3 Flash via StreamLake charged ~55% below list), so our computed cost is an upper bound, and the per-request OpenRouter charge in the report and dashboard is the cross-check. After each wake the controller looks up what OpenRouter charged per request (and which provider served it), in the background (the wake's scheduler slot is already free) and for at most 90 s; the report and dashboard show it beside our computed cost, which stays authoritative. pi gets a `models.json` entry for the literal model string (from the catalogue, output capped at 32K tokens) in `data/runs/<run>/agents/<name>/runtime/pi/`, and has no max-turns flag: the controller stops the wake past `max_turns`.
 
 ## Cheatsheet
 
@@ -40,6 +54,9 @@ just status                        # in another terminal; `just report` for the 
 | Egress proxy down | `docker compose -f docker/compose.yaml down` |
 | Proxy logs (allowed/denied hosts) | `docker logs -f slopswarm-proxy` |
 | Allowlist | `network.allowlist` in `config/*.yaml`; applied on the next `just up` |
+| Web search via the relay | `search: relay` in `config/agents/<name>.yaml` (default `native` for claude/codex, which turns their own search off; pi is relay-only); `.env` `EXA_API_KEY=…` (set a spend cap at exa.ai) |
+| Relay searches / logs | `data/runs/<run>/search/log/search.jsonl`; `docker logs slopswarm-search-<run>` |
+| Web fetch (`webfetch URL [-o FILE]`, all agents) | `webfetch:` in `config/*.yaml` (`max_mb`, `timeout_s`, `max_redirects`; remove the section to turn it off); log: `data/runs/<run>/search/log/fetch.jsonl`; check: `just preflight 10` |
 | Stop a run / emergency | `just stop` (running wakes finish) / `just kill` (`docker kill` the current run's containers) |
 | Continue a run | `just extend [run] --time 1h --agent-usd 0.5` (`--agent-usd 0.5` adds to every agent, `--agent-usd bramble=1` to one; `--swarm-usd 2` to the swarm); then `just resume [run]` if no controller is running it |
 | Parallel worktrees | own `./data` each; set `PORT=…` / `FORGE_PORT=…` if 7777 / 3300 are taken; proxy and agent image are shared (image tag = Dockerfile hash) |
@@ -61,6 +78,6 @@ Live pages refresh their SvelteKit data every five seconds. Refresh pauses while
 ## Pointers
 
 - Original plan and rationale (no longer maintained): [docs/plans/2026-10-10-tiny-society-token-probe.md](docs/plans/2026-10-10-tiny-society-token-probe.md). Open plans: `docs/plans/`; finished ones: `docs/plans/_archive/`
-- Config: `config/smoke.yaml`, `config/swarm.yaml` (the 1-hour run), agents in `config/agents/`, prices in `config/pricing.yaml`, seed prompt in `config/seed.md`
+- Config: `config/smoke.yaml`, `config/swarm.yaml` (the 1-hour run), agents in `config/agents/`, prices in `config/pricing.yaml` (each agent's `/self/pricing.yaml` holds only its own models: configured plus any it was billed for), seed prompt in `config/seed.md`
 - Data (gitignored): `data/swarm.db`, `data/runs/<run>/`, or wherever `SLOPSWARM_DATA_DIR` points
 - Findings: `docs/findings/`

@@ -1,10 +1,10 @@
-# Smoke: 1 Claude + 2 Codex agents, just long enough to see agents find each other on the forge (plan §12).
+# Smoke: 1 Claude + 2 Codex + 1 pi (OpenRouter) agents, just long enough to see agents find each other on the forge (plan §12).
 run:
   name: smoke
   max_duration_min: 8
   world_end_grace_s: 60     # a wake still running at the world end is stopped this long after it
 
-agents: [bramble, sorrel, wren]   # -> config/agents/<name>.yaml
+agents: [bramble, sorrel, wren, fern]   # -> config/agents/<name>.yaml
 
 budgets:
   swarm_usd: 10
@@ -28,14 +28,22 @@ network:
     - chatgpt.com
     - api.openai.com
     - auth.openai.com
-    - github.com              # the GitHub outlet (github: below); covers api. and uploads.
+    - openrouter.ai           # OpenRouter models (pi agents) and the generation cost lookup
+    - github.com              # public GitHub, read-only without the github: outlet below; covers api. and uploads.
     - githubusercontent.com   # raw files, release assets
 
-# The agents' public outlet (plan §4.6): one org, one account they all share. Token: secrets/github/token.
-# Remove this section and the two github domains above to run without it.
-github:
-  org: slop-swarm
-  user: slop-swarm-agents
+# The agents' public outlet (plan §4.6): one org, one account they all share. Token: SWARM_GITHUB_TOKEN in .env.
+# Off for now: the org keeps repos between runs, so a new run would start from earlier runs' work.
+# github:
+#   org: slop-swarm
+#   user: slop-swarm-agents
+
+# Agents' `webfetch <url>` (any harness): GET-only downloads of public URLs, done by the run's relay; agents never
+# connect out themselves and the allowlist above stays as it is. Remove this section to turn it off.
+webfetch:
+  max_mb: 20                # larger downloads are refused
+  timeout_s: 30             # per fetch, redirects included
+  max_redirects: 5          # each hop is re-checked (public address, port 80/443)
 
 forge:                      # the run's Forgejo, the agents' shared world (plan §4.5)
   image: codeberg.org/forgejo/forgejo:16.0.4-rootless

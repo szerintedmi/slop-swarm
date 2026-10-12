@@ -1,8 +1,12 @@
 // Shared types. The internal event stream is modelled on ACP's `session/update`
 // (tool_call / message / usage / turn_end) so an ACP adapter can slot in later (plan §8).
 
-export type Runtime = "claude" | "codex";
+/** The agent CLI (harness) a wake runs: Claude Code, Codex CLI or pi. */
+export const HARNESSES = ["claude", "codex", "pi"] as const;
+export type Harness = (typeof HARNESSES)[number];
 export type Effort = "low" | "medium" | "high";
+/** Web search: the harness's own tool (`native`) or the run's Exa relay via `websearch` (`relay`, src/search.ts). */
+export type SearchMode = "native" | "relay";
 
 export type AgentStatus = "active" | "sleeping" | "waking" | "paused" | "depleted" | "failed";
 /** initial | self (agent's chosen time) | timer (max_sleep reached / retry) | message | manual */
@@ -52,6 +56,8 @@ export type AgentEvent =
   | { kind: "tool_call"; id: string; name: string; args: string }
   | { kind: "tool_result"; id: string; ok: boolean; summary: string }
   | { kind: "usage"; usage: RequestUsage }
+  /** One assistant turn started (pi); the controller counts these for harnesses without a max-turns flag. */
+  | { kind: "turn_start"; n: number }
   | {
       kind: "turn_end";
       /** Normalised: completed | max_turns | error */
@@ -75,6 +81,8 @@ export interface CommandOptions {
   effort: Effort;
   maxTurns: number;
   resumeSessionId?: string;
+  /** false: turn the harness's own web search tool off (the agent searches through the relay). Default true. */
+  nativeSearch?: boolean;
 }
 
 export interface StreamParser {
@@ -93,6 +101,11 @@ export interface FinalizeContext {
   /** Unix ms when the wake started; session-file records older than this belong to earlier (resumed) wakes. */
   wakeStartedAt?: number;
   /**
+   * Request ids already billed to earlier wakes of the agent. A resumed session's file also holds those wakes'
+   * records, and the timestamp cut has clock slack, so adapters that read session files skip these ids.
+   */
+  billedRequestIds?: ReadonlySet<string>;
+  /**
    * Raw stdout of the previous wake of the same session, when this wake resumed it. Both CLIs report
    * some totals cumulatively over a resumed session (Claude `result.modelUsage` / `total_cost_usd`,
    * Codex `turn.completed.usage`); adapters subtract the previous wake's totals to get this wake's own.
@@ -100,15 +113,25 @@ export interface FinalizeContext {
   previousWakeStdoutLines?: string[];
 }
 
-export interface RuntimeAdapter {
-  readonly runtime: Runtime;
+export interface HarnessAdapter {
+  readonly harness: Harness;
   /** True when `turn_end.reportedCostUsd` accumulates over a resumed session (Claude's total_cost_usd). */
   readonly reportedCostIsCumulative?: boolean;
+  /**
+   * How the controller enforces budgets.per_wake.max_turns for a CLI without a flag for it: by tool calls
+   * (Codex) or by `turn_start` events (pi). Absent = the CLI enforces it (`maxTurns` in CommandOptions).
+   */
+  readonly maxTurnsBy?: "tool_calls" | "turns";
+  /**
+   * The `search:` modes this harness supports; the first is the default. `relay` turns the harness's own
+   * search tool off (CommandOptions.nativeSearch), so a relay agent never has both.
+   */
+  readonly searchModes: readonly [SearchMode, ...SearchMode[]];
   /** argv to run inside the container (cwd = /home/agent). */
   buildCommand(o: CommandOptions): string[];
   /** Extra container env, e.g. CLAUDE_CONFIG_DIR / CODEX_HOME pointing at the runtime mount. */
   containerEnv(runtimeMount: string): Record<string, string>;
-  /** `model` labels usage for runtimes whose stream doesn't name it (Codex). */
+  /** `model` labels usage for harnesses whose stream doesn't name it (Codex). */
   newParser(o?: { model?: string }): StreamParser;
   /** Authoritative per-request usage after the container exits. */
   finalizeUsage(ctx: FinalizeContext): Promise<RequestUsage[]>;

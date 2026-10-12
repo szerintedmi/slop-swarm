@@ -12,7 +12,7 @@ The host login check throws when the `codex` binary is missing, failing the whol
 
 ## 2. Simplification (when touching the area)
 
-The dashboard's dynamic import of the runtimes module can be a static import.
+The dashboard's dynamic import of the harnesses module can be a static import.
 
 ## 3. Checks after the 1-hour run
 

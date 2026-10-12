@@ -5,4 +5,4 @@
   const reasoning = $derived(req?.reasoning ?? u.reasoning);
   const title = $derived(req ? `fresh ${int(req.fresh_input)} · cache read ${int(req.cache_read)} · cache write ${int(req.cache_write_5m + req.cache_write_1h)} · out ${int(req.output)} · reasoning ${int(req.reasoning)}${req.tier ? ` · tier >${int(req.tier)}` : ''}` : '');
 </script>
-<span class="costchip" {title}>request <code>{u.requestId}</code> · {int(prompt)} in · {int(req?.output ?? u.output)} out{reasoning ? ` (${int(reasoning)} reasoning)` : ''} · <strong>{req ? usd(req.cost_usd, 5) : 'cost pending'}</strong></span>
+<span class="costchip" {title}>request <code>{u.requestId}</code> · {int(prompt)} in · {int(req?.output ?? u.output)} out{reasoning ? ` (${int(reasoning)} reasoning)` : ''} · <strong>{req ? usd(req.cost_usd, 5) : 'cost pending'}</strong>{#if req?.vendor_cost_usd != null} · charged {usd(req.vendor_cost_usd, 5)}{req.vendor_provider ? ` via ${req.vendor_provider}` : ''}{/if}</span>

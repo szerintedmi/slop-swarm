@@ -62,7 +62,7 @@ describe("world time", () => {
        VALUES (?, ?, 'cli', ?, ?, ?, 2, '{"*":0.5}')`,
     ).run(RUN, T0 + 180 * MIN, 60 * MIN, T0 + 60 * MIN, T0 + 240 * MIN);
     db.query(
-      `INSERT INTO agents (run_id, name, runtime, model, effort, budget_usd, spent_usd, status, wake_count)
+      `INSERT INTO agents (run_id, name, harness, model, effort, budget_usd, spent_usd, status, wake_count)
        VALUES (?, 'bramble', 'claude', 'claude-haiku-5-5', 'medium', 1.5, 0.4, 'sleeping', 2)`,
     ).run(RUN);
     const wake = db.query(

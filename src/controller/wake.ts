@@ -4,12 +4,16 @@ import { copyFileSync, createWriteStream, existsSync, lstatSync, readdirSync, re
 import { join } from "node:path";
 import type { SwarmConfig } from "../config.ts";
 import { agentDirs, type WakeRow } from "../db/index.ts";
-import { dockerRunArgs, MOUNTS, type ContainerSpec } from "../docker.ts";
+import type { AgentConfig } from "../config.ts";
+import { dockerProcessEnv, dockerRunArgs, MOUNTS, type ContainerSpec } from "../docker.ts";
 import { forgeEnv, forgeHost, forgeUrl, type ForgeApi } from "../forge.ts";
-import { githubEnv, writeGithubLogin } from "../github.ts";
+import { GITHUB_TOKEN_ENV, githubEnv, githubTokenFromEnv, writeGithubLogin } from "../github.ts";
+import { generationCosts, type VendorCost } from "../openrouter.ts";
 import { computeCost, type PricingTable } from "../pricing/index.ts";
-import { getAdapter } from "../runtimes/index.ts";
-import type { AgentEvent, CostBreakdown, RequestUsage, RuntimeAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
+import { getAdapter } from "../harnesses/index.ts";
+import { issueSearchToken, readSearchLog, revokeSearchToken, runSearchDirs, SEARCH_MODEL, SEARCH_PROMPT_LINE, searchEnv, searchHost, searchRows, usesRelay } from "../search.ts";
+import { webfetchPromptBlock } from "../webfetch.ts";
+import type { AgentEvent, CostBreakdown, RequestUsage, Harness, HarnessAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
 import { isDepleted, overLimit, wakeLimit, agentRemaining } from "./budget.ts";
 import type { Repo } from "./repo.ts";
 import { fillSeed, wakeNote, SYSTEM_PROMPT_FILE } from "./run.ts";
@@ -22,6 +26,8 @@ export const RETRY_AFTER_MS = 60_000;
 const LIVE_POLL_MS = 5_000;
 const KILL_RETRY_MS = 1_000;
 const ARGS_MAX = 200;
+/** Total time the OpenRouter cost cross-check may take after a wake. */
+const VENDOR_CHECK_MS = 90_000;
 
 export interface ProcessHandle {
   stdout: ReadableStream<Uint8Array>;
@@ -41,15 +47,17 @@ export interface WakeDeps {
   image: string;
   /** Path of the Codex auth file copied into a codex agent's runtime dir if missing. */
   codexAuthPath: string;
-  /** Path of the shared GitHub token (github.ts); read each wake when the run has a GitHub outlet. */
-  githubTokenPath: string;
+  /** The agents' shared GitHub token (github.ts, from .env); read each wake when the run has a GitHub outlet. Injectable for tests. */
+  githubToken?: () => string | undefined;
   /** The run's forge: unread notification counts (plan §4.5). */
   forge: ForgeApi;
-  /** Start `docker run …`; injectable for tests. stderr goes to `stderrPath`. */
-  startProcess?: (argv: string[], stderrPath: string) => ProcessHandle;
+  /** Start `docker run …` with `env` as its environment; injectable for tests. stderr goes to `stderrPath`. */
+  startProcess?: (argv: string[], stderrPath: string, env: Record<string, string | undefined>) => ProcessHandle;
   /** Kill the wake's container; injectable for tests. */
   killContainer?: (name: string) => Promise<void>;
-  adapterFor?: (runtime: "claude" | "codex") => RuntimeAdapter;
+  adapterFor?: (harness: Harness) => HarnessAdapter;
+  /** OpenRouter's charged cost per generation id (cross-check); injectable for tests. */
+  vendorCosts?: (ids: string[], key: string) => Promise<Map<string, VendorCost>>;
   now?: () => number;
 }
 
@@ -67,10 +75,12 @@ export interface WakeOutcome {
   wakeId: number;
   exitReason: WakeExitReason;
   costUsd: number;
+  /** The OpenRouter cost cross-check, still running after the wake (and its scheduler slot) ended. */
+  vendorCheck?: Promise<void>;
 }
 
-function defaultStart(argv: string[], stderrPath: string): ProcessHandle {
-  const p = Bun.spawn(argv, { stdout: "pipe", stderr: Bun.file(stderrPath), stdin: "ignore", env: process.env });
+function defaultStart(argv: string[], stderrPath: string, env: Record<string, string | undefined>): ProcessHandle {
+  const p = Bun.spawn(argv, { stdout: "pipe", stderr: Bun.file(stderrPath), stdin: "ignore", env });
   return { stdout: p.stdout, exited: p.exited };
 }
 
@@ -125,11 +135,17 @@ export function previousSessionLines(previous: WakeRow[], sessionId: string | un
 }
 
 /** The vendor-reported cost of the previous wake, as its stream said it (cumulative for Claude). */
-function reportedCostOf(adapter: RuntimeAdapter, model: string, lines: string[]): number | undefined {
+function reportedCostOf(adapter: HarnessAdapter, model: string, lines: string[]): number | undefined {
   const parser = adapter.newParser({ model });
   let reported: number | undefined;
   for (const l of lines) for (const e of parser.push(l)) if (e.kind === "turn_end" && e.reportedCostUsd !== undefined) reported = e.reportedCostUsd;
   return reported;
+}
+
+/** Secrets a harness's container gets by name (never in argv): the Claude token, or the agent's OpenRouter key. */
+export function secretEnv(agent: Pick<AgentConfig, "harness" | "provider" | "keyEnv">): NonNullable<ContainerSpec["passEnv"]> {
+  if (agent.provider === "openrouter" && agent.keyEnv) return [{ name: "OPENROUTER_API_KEY", from: agent.keyEnv }];
+  return agent.harness === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
 }
 
 /**
@@ -148,7 +164,8 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
   const startProcess = deps.startProcess ?? defaultStart;
   const killContainer = deps.killContainer ?? defaultKill;
   const a = repo.agent(agentName);
-  const adapter = (deps.adapterFor ?? getAdapter)(a.runtime);
+  const adapter = (deps.adapterFor ?? getAdapter)(a.harness);
+  const agentCfg = cfg.agents.find((x) => x.name === a.name);
   const dirs = agentDirs(repo.runId, a.name);
   const seq = a.wake_count + 1;
   const startedAt = now();
@@ -215,6 +232,13 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     }
   };
 
+  // The run's relay (src/search.ts): web search for `search: relay` agents, web fetch for every agent when the
+  // world has `webfetch:` (src/webfetch.ts). A token for this wake only, revoked when it ends.
+  const searchRelay = cfg.agents.some((c) => c.name === a.name && usesRelay(c));
+  const relay = searchRelay || cfg.webfetch ? runSearchDirs(repo.runId) : null;
+  /** This wake's relay searches as request rows (no tokens, one web search each, priced from the run's snapshot). */
+  const searches = () => (relay && searchRelay ? searchRows(deps.pricing, readSearchLog(relay.logFile, wakeId)) : { rows: [], total: 0 });
+
   const done = (async (): Promise<WakeOutcome> => {
     const unread = await unreadOf();
     repo.updateWake(wakeId, { msgs_in: unread });
@@ -227,25 +251,33 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     const swarmRemaining = Math.max(0, deps.swarmBudgetUsd - repo.swarmSpent());
     const limit = wakeLimit(cfg.budgets.perWake.maxUsd, agentRemaining(a), swarmRemaining);
 
-    writeSelf(dirs.self, a.budget_usd, previous, deps.pricingYaml);
+    // The agent sees only its own models' prices; costing above keeps the full table.
+    writeSelf(dirs.self, a.budget_usd, previous, deps.pricingYaml, [...repo.agentModels(a.name), ...(searchRelay ? [SEARCH_MODEL] : [])]);
 
-    if (a.runtime === "codex" && !existsSync(join(dirs.runtime, "auth.json"))) {
+    if (a.harness === "codex" && !existsSync(join(dirs.runtime, "auth.json"))) {
       if (!existsSync(deps.codexAuthPath)) throw new Error(`codex auth missing: ${deps.codexAuthPath}`);
       copyFileSync(deps.codexAuthPath, join(dirs.runtime, "auth.json"));
       chmodSync(join(dirs.runtime, "auth.json"), 0o600);
     }
 
     if (cfg.github) {
-      if (!existsSync(deps.githubTokenPath)) throw new Error(`github token missing: ${deps.githubTokenPath}`);
-      writeGithubLogin(dirs.runtime, cfg.github.user, readFileSync(deps.githubTokenPath, "utf8").trim());
+      const token = (deps.githubToken ?? githubTokenFromEnv)();
+      if (!token) throw new Error(`github token missing: ${GITHUB_TOKEN_ENV} is not set in .env`);
+      writeGithubLogin(dirs.runtime, cfg.github.user, token);
     }
+
+    if (relay) issueSearchToken(relay, dirs.runtime, a.name, wakeId, { search: searchRelay });
 
     // Only a next_wake.yaml written (or rewritten) during this wake counts.
     const nwPath = join(dirs.home, "next_wake.yaml");
     const nwBefore = statSync(nwPath, { throwIfNoEntry: false })?.mtimeMs;
 
-    // Lean harness: the filled seed is the whole system prompt; the user turn is the wake note.
-    const seed = fillSeed(deps.seed, { name: a.name, forgeUrl: forgeUrl(repo.runId), maxSleepMs: cfg.scheduler.maxSleepMs, github: cfg.github });
+    // Lean harness: the filled seed is the whole system prompt; the user turn is the wake note. Every harness
+    // gets it (claude --system-prompt, codex model_instructions_file, pi --system-prompt), web tool lines included.
+    const seed =
+      fillSeed(deps.seed, { name: a.name, forgeUrl: forgeUrl(repo.runId), maxSleepMs: cfg.scheduler.maxSleepMs, github: cfg.github }) +
+      (searchRelay ? SEARCH_PROMPT_LINE : "") +
+      (cfg.webfetch ? webfetchPromptBlock(cfg.webfetch) : "");
     writeFileSync(join(dirs.runtime, SYSTEM_PROMPT_FILE), seed);
     const argv = adapter.buildCommand({
       prompt: wakeNote({
@@ -265,6 +297,8 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       effort: a.effort as "low" | "medium" | "high",
       maxTurns: cfg.budgets.perWake.maxTurns,
       resumeSessionId: resumeId,
+      // On the relay the harness's own search tool is off, so the agent doesn't have both.
+      nativeSearch: !searchRelay,
     });
     const spec: ContainerSpec = {
       name: containerName,
@@ -272,15 +306,39 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       runId: repo.runId,
       agent: a.name,
       mounts: { home: dirs.home, self: dirs.self, runtime: dirs.runtime },
-      env: { ...adapter.containerEnv(MOUNTS.runtime), ...forgeEnv(repo.runId), ...(cfg.github ? githubEnv() : {}) },
-      passEnv: a.runtime === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [],
+      env: { ...adapter.containerEnv(MOUNTS.runtime), ...forgeEnv(repo.runId), ...(cfg.github ? githubEnv() : {}), ...(relay ? searchEnv(repo.runId) : {}) },
+      passEnv: secretEnv(agentCfg ?? { harness: a.harness, provider: "native" }),
       argv,
       network: cfg.network.name,
       proxy: cfg.network.proxy,
-      noProxy: [forgeHost(repo.runId)],
+      noProxy: [forgeHost(repo.runId), ...(relay ? [searchHost(repo.runId)] : [])],
       limits: cfg.controller.container,
     };
     repo.lifecycle("wake_start", `${trigger}${resumed ? " (resumed)" : ""}`, a.name, wakeId);
+
+    /**
+     * OpenRouter's charged cost and serving provider per request, beside ours (which stays authoritative). The
+     * wake's vendor-reported cost is set only when every model request resolved. Runs after the wake has released
+     * its slot, bounded by VENDOR_CHECK_MS; never fails the wake.
+     */
+    const crossCheck = async (keyEnv: string, requestIds: string[]) => {
+      const ids = requestIds.filter((id) => id.startsWith("gen-"));
+      const key = process.env[keyEnv];
+      if (!ids.length || !key) return;
+      try {
+        const found = await (deps.vendorCosts ?? ((i: string[], k: string) => generationCosts(i, k, { deadlineMs: VENDOR_CHECK_MS })))(ids, key);
+        repo.setVendorCosts(wakeId, found);
+        if (ids.length === requestIds.length && found.size === ids.length)
+          repo.updateWake(wakeId, { reported_cost_usd: [...found.values()].reduce((s, v) => s + v.costUsd, 0) });
+        if (found.size < ids.length) repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "openrouter_cost", detail: `${ids.length - found.size} of ${ids.length} generation(s) not found`, ok: 0 });
+      } catch (err) {
+        try {
+          repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "openrouter_cost", detail: short(String(err)), ok: 0 });
+        } catch {
+          /* the run may have closed its database meanwhile */
+        }
+      }
+    };
 
     // Live streaming + costing.
     const parser = adapter.newParser({ model: a.model });
@@ -292,17 +350,21 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     let live: RequestUsage[] = [];
     let lastPersist = 0;
 
+    const billed = repo.billedRequestIds(a.name, wakeId);
     const finalize = () =>
-      adapter.finalizeUsage({ runtimeDir: dirs.runtime, sessionId, streamed: [...streamed.values()], stdoutLines, wakeStartedAt: startedAt, previousWakeStdoutLines: previousLines });
+      adapter.finalizeUsage({ runtimeDir: dirs.runtime, sessionId, streamed: [...streamed.values()], stdoutLines, wakeStartedAt: startedAt, billedRequestIds: billed, previousWakeStdoutLines: previousLines });
 
     const evaluate = (force = false) => {
       const usages = live.length >= streamed.size ? live : [...streamed.values()];
-      const { rows, total } = costAll(deps.pricing, usages);
+      const llm = costAll(deps.pricing, usages);
+      const s = searches();
+      const rows = [...llm.rows, ...s.rows];
+      const total = llm.total + s.total;
       const reason = overLimit(total, limit);
       if (reason) kill(reason);
       if (force || now() - lastPersist > 2_000) {
         repo.replaceRequests(wakeId, a.name, rows);
-        repo.updateWake(wakeId, { cost_usd: total, requests: rows.length, tool_calls: toolCalls, session_id: sessionId ?? null });
+        repo.updateWake(wakeId, { cost_usd: total, requests: llm.rows.length, tool_calls: toolCalls, session_id: sessionId ?? null });
         lastPersist = now();
       }
     };
@@ -335,7 +397,11 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
           toolCalls++;
           repo.event({ agent: a.name, wake_id: wakeId, kind: "tool_call", name: e.name, detail: short(e.args), ok: null });
           // Codex has no --max-turns flag; enforce the limit on tool calls (plan §6).
-          if (a.runtime === "codex" && toolCalls > cfg.budgets.perWake.maxTurns) kill("max_turns");
+          if (adapter.maxTurnsBy === "tool_calls" && toolCalls > cfg.budgets.perWake.maxTurns) kill("max_turns");
+          break;
+        case "turn_start":
+          // pi has none either; it reports each assistant turn.
+          if (adapter.maxTurnsBy === "turns" && e.n > cfg.budgets.perWake.maxTurns) kill("max_turns");
           break;
         case "tool_result":
           if (!e.ok) repo.event({ agent: a.name, wake_id: wakeId, kind: "tool_result", name: e.id, detail: short(e.summary), ok: 0 });
@@ -348,7 +414,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
 
     // An emergency kill during the setup above must not start a container now.
     if (abortReason) proc = { stdout: new ReadableStream<Uint8Array>({ start: (c) => c.close() }), exited: Promise.resolve(-1) };
-    else proc = startProcess(dockerRunArgs(spec), rawLog.replace(/\.jsonl$/, ".stderr.log"));
+    else proc = startProcess(dockerRunArgs(spec), rawLog.replace(/\.jsonl$/, ".stderr.log"), dockerProcessEnv(spec));
     arm();
     // Codex streams usage only at turn end; its rollout file has per-request usage as it happens.
     poll = setInterval(() => void refresh(true), LIVE_POLL_MS);
@@ -389,13 +455,18 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "finalize_usage", detail: short(String(err)), ok: 0 });
       finalUsage = [...streamed.values()];
     }
-    const { rows, total } = costAll(deps.pricing, finalUsage);
+    // The token stops working first, so no search lands after the wake's searches are billed.
+    if (relay) revokeSearchToken(relay, wakeId);
+    const llm = costAll(deps.pricing, finalUsage);
+    const searched = searches();
+    const rows = [...llm.rows, ...searched.rows];
+    const total = llm.total + searched.total;
     repo.replaceRequests(wakeId, a.name, rows);
 
     // A "completed" wake with no billed request means the CLI never reached the model (e.g. bad auth).
     const exitReason: WakeExitReason =
       abortReason ??
-      (turnEnd?.reason === "max_turns" ? "max_turns" : turnEnd?.reason === "completed" && exitCode === 0 && rows.length > 0 ? "completed" : "error");
+      (turnEnd?.reason === "max_turns" ? "max_turns" : turnEnd?.reason === "completed" && exitCode === 0 && llm.rows.length > 0 ? "completed" : "error");
     const endedAt = now();
 
     // Vendor-reported cost, as this wake's share when the CLI reports it cumulatively over a resumed session.
@@ -419,7 +490,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       session_id: sessionId ?? null,
       cost_usd: total,
       reported_cost_usd: reportedCost,
-      requests: rows.length,
+      requests: llm.rows.length,
       fresh_input: sum((u) => u.freshInput),
       cache_read: sum((u) => u.cacheRead),
       cache_write_5m: sum((u) => u.cacheWrite5m),
@@ -465,10 +536,13 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
       next_trigger: nextTrigger,
     });
     repo.lifecycle("wake_end", `${exitReason}, $${total.toFixed(4)}${status !== "sleeping" ? `, now ${status}` : ""}`, a.name, wakeId);
-    return { wakeId, exitReason, costUsd: total };
+    // Model requests only: relay searches have no generation to look up.
+    const vendorCheck = agentCfg?.provider === "openrouter" && agentCfg.keyEnv ? crossCheck(agentCfg.keyEnv, llm.rows.map((r) => r.u.requestId)) : undefined;
+    return { wakeId, exitReason, costUsd: total, vendorCheck };
   })().catch((err) => {
     disarm();
     clearInterval(poll);
+    if (relay) revokeSearchToken(relay, wakeId);
     repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "wake", detail: short(String(err?.stack ?? err), 500), ok: 0 });
     const endedAt = now();
     repo.updateWake(wakeId, { ended_at: endedAt, exit_reason: "error" });

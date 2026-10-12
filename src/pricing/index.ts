@@ -2,18 +2,28 @@
 import { readFileSync } from "node:fs";
 import type { CostBreakdown, RequestUsage } from "../types.ts";
 
+export interface PerMtok {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite5m: number;
+  cacheWrite1h: number;
+}
+
 export interface PricingTier {
   /** Applies when the request's prompt tokens are strictly above this. */
   abovePromptTokens: number;
-  /** Applied to fresh input, cache reads and cache writes. */
+  /** Applied to fresh input, cache reads and cache writes. 1 when the tier has absolute prices. */
   inputMultiplier: number;
   outputMultiplier: number;
+  /** Absolute prices for the tier (e.g. OpenRouter's `overrides`); fields it lacks keep the base price. */
+  perMtok?: Partial<PerMtok>;
 }
 
 export interface PricingModel {
   provider: string;
   /** USD per million tokens. */
-  perMtok: { input: number; output: number; cacheRead: number; cacheWrite5m: number; cacheWrite1h: number };
+  perMtok: PerMtok;
   /** Sorted ascending by abovePromptTokens. */
   tiers: PricingTier[];
   /** USD per tool use, e.g. { web_search: 0.01 }. */
@@ -24,6 +34,20 @@ export interface PricingModel {
 
 export interface PricingTable {
   models: Record<string, PricingModel>;
+  /** Web search through the relay (src/search.ts), by pseudo-model name (e.g. `exa-search`). */
+  search: Record<string, SearchPricing>;
+}
+
+/** A search API priced per request (pricing.yaml `search:`), e.g. Exa. */
+export interface SearchPricing {
+  provider: string;
+  /** USD per request with up to `includedResults` results, by search type (`auto`, `fast`, …). */
+  perRequestUsd: Record<string, number>;
+  includedResults: number;
+  /** USD per result above `includedResults`. */
+  perExtraResultUsd: number;
+  /** USD per returned page, by content type (`highlights`, `text`, `summary`). */
+  perPageUsd: Record<string, number>;
 }
 
 export class PricingError extends Error {}
@@ -37,6 +61,14 @@ function price(v: unknown, field: string): number {
   return v;
 }
 
+const PER_MTOK_KEYS = [
+  ["input", "input"],
+  ["output", "output"],
+  ["cache_read", "cacheRead"],
+  ["cache_write_5m", "cacheWrite5m"],
+  ["cache_write_1h", "cacheWrite1h"],
+] as const;
+
 export function parsePricing(yamlText: string): PricingTable {
   const root = rec(Bun.YAML.parse(yamlText), "pricing");
   const models: Record<string, PricingModel> = {};
@@ -47,8 +79,18 @@ export function parsePricing(yamlText: string): PricingTable {
     const tiersRaw = m.tiers ?? [];
     if (!Array.isArray(tiersRaw)) throw new PricingError(`${f}.tiers: expected a list`);
     const tiers = tiersRaw
-      .map((t, i) => {
+      .map((t, i): PricingTier => {
         const tt = rec(t, `${f}.tiers[${i}]`);
+        const above = price(tt.above_prompt_tokens, `${f}.tiers[${i}].above_prompt_tokens`);
+        // Absolute prices instead of multipliers (OpenRouter's long-context overrides).
+        if (tt.per_mtok !== undefined) {
+          if (tt.multiplier !== undefined || tt.input_multiplier !== undefined || tt.output_multiplier !== undefined)
+            throw new PricingError(`${f}.tiers[${i}]: per_mtok or multipliers, not both`);
+          const tp = rec(tt.per_mtok, `${f}.tiers[${i}].per_mtok`);
+          const perMtok: Partial<PerMtok> = {};
+          for (const [yamlKey, key] of PER_MTOK_KEYS) if (tp[yamlKey] !== undefined) perMtok[key] = price(tp[yamlKey], `${f}.tiers[${i}].per_mtok.${yamlKey}`);
+          return { abovePromptTokens: above, inputMultiplier: 1, outputMultiplier: 1, perMtok };
+        }
         // `multiplier` sets both; `input_multiplier` / `output_multiplier` override it (e.g. OpenAI: 2x input, 1.5x output).
         const mult = (key: string) => {
           const v = price(tt[key] ?? tt.multiplier, `${f}.tiers[${i}].${key} (or multiplier)`);
@@ -56,7 +98,7 @@ export function parsePricing(yamlText: string): PricingTable {
           return v;
         };
         return {
-          abovePromptTokens: price(tt.above_prompt_tokens, `${f}.tiers[${i}].above_prompt_tokens`),
+          abovePromptTokens: above,
           inputMultiplier: mult("input_multiplier"),
           outputMultiplier: mult("output_multiplier"),
         };
@@ -82,11 +124,53 @@ export function parsePricing(yamlText: string): PricingTable {
     };
   }
   if (Object.keys(models).length === 0) throw new PricingError("models: expected at least one model");
-  return { models };
+  return { models, search: parseSearchPricing(root.search) };
+}
+
+function parseSearchPricing(raw: unknown): Record<string, SearchPricing> {
+  const out: Record<string, SearchPricing> = {};
+  for (const [name, v] of Object.entries(rec(raw ?? {}, "search"))) {
+    const f = `search.${name}`;
+    const s = rec(v, f);
+    const prices = (x: unknown, field: string) => Object.fromEntries(Object.entries(rec(x ?? {}, field)).map(([k, p]) => [k, price(p, `${field}.${k}`)]));
+    const perRequestUsd = prices(s.per_request_usd, `${f}.per_request_usd`);
+    if (!Object.keys(perRequestUsd).length) throw new PricingError(`${f}.per_request_usd: expected a price per search type`);
+    out[name] = {
+      provider: typeof s.provider === "string" ? s.provider : "unknown",
+      perRequestUsd,
+      includedResults: price(s.included_results ?? 0, `${f}.included_results`),
+      perExtraResultUsd: price(s.per_extra_result_usd ?? 0, `${f}.per_extra_result_usd`),
+      perPageUsd: prices(s.per_page_usd, `${f}.per_page_usd`),
+    };
+  }
+  return out;
+}
+
+/**
+ * One search's cost from the provider's documented formula: the base price for its type, plus each result
+ * above the included ones, plus each returned page per content type. Unknown content types cost 0.
+ */
+export function searchCost(s: { model: string; type: string; results: number; pages: Record<string, number> }, p: PricingTable): number {
+  const m = p.search[s.model];
+  if (!m) throw new PricingError(`no search pricing for ${JSON.stringify(s.model)}`);
+  const base = m.perRequestUsd[s.type];
+  if (base === undefined) throw new PricingError(`no search pricing for ${s.model} type ${JSON.stringify(s.type)}`);
+  const extra = Math.max(0, s.results - m.includedResults) * m.perExtraResultUsd;
+  const pages = Object.entries(s.pages).reduce((sum, [k, n]) => sum + n * (m.perPageUsd[k] ?? 0), 0);
+  return base + extra + pages;
 }
 
 export function loadPricing(path: string): PricingTable {
   return parsePricing(readFileSync(path, "utf8"));
+}
+
+/**
+ * The model name requests are priced under: an OpenRouter preset reference (`slug@preset/name`) is priced
+ * as the model before the `@`; the preset only holds provider routing.
+ */
+export function priceKey(model: string): string {
+  const at = model.indexOf("@");
+  return at > 0 ? model.slice(0, at) : model;
 }
 
 export function promptTokens(u: RequestUsage): number {
@@ -100,15 +184,16 @@ export function computeCost(u: RequestUsage, p: PricingTable): CostBreakdown {
   let tier = 0;
   let inMult = 1;
   let outMult = 1;
+  let r = m.perMtok;
   for (const t of m.tiers) {
     if (prompt > t.abovePromptTokens) {
       tier = t.abovePromptTokens;
       inMult = t.inputMultiplier;
       outMult = t.outputMultiplier;
+      r = { ...m.perMtok, ...t.perMtok };
     }
   }
   const billedOutput = u.output + (m.outputIncludesReasoning ? 0 : u.reasoning);
-  const r = m.perMtok;
   const inputUsd = u.freshInput * r.input + u.cacheRead * r.cacheRead + u.cacheWrite5m * r.cacheWrite5m + u.cacheWrite1h * r.cacheWrite1h;
   const tokenUsd = (inputUsd * inMult + billedOutput * r.output * outMult) / 1_000_000;
   const toolUsd = u.webSearches * (m.toolFeesUsd.web_search ?? 0);

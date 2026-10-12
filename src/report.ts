@@ -1,6 +1,8 @@
 // Markdown cost summary for a run (plan §12).
 import type { Database } from "bun:sqlite";
 import type { AgentRow, RequestRow, RunRow, WakeRow } from "./db/index.ts";
+import { billed, readSearchLog, runSearchDirs, SEARCH_MODEL } from "./search.ts";
+import { fetched, readFetchLog, type FetchLogEntry } from "./webfetch.ts";
 import { describeExtension, extensionsOf, swarmBudgetUsd, worldGaps, worldTime } from "./world.ts";
 
 export function quantile(xs: number[], q: number): number {
@@ -43,7 +45,10 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
   const allWakes = db.query<WakeRow, [string]>("SELECT * FROM wakes WHERE run_id = ? AND ended_at IS NOT NULL ORDER BY started_at").all(runId);
   // Wakes that never reached the model (auth/infra failures) would skew every cost statistic.
   const wakes = allWakes.filter((w) => w.requests > 0);
-  const requests = db.query<RequestRow, [string]>("SELECT * FROM requests WHERE run_id = ? ORDER BY wake_id, seq").all(runId);
+  const allRequests = db.query<RequestRow, [string]>("SELECT * FROM requests WHERE run_id = ? ORDER BY wake_id, seq").all(runId);
+  // Relay web searches are billed as request rows without tokens (src/search.ts); kept apart from model requests.
+  const requests = allRequests.filter((r) => r.model !== SEARCH_MODEL);
+  const searchRequests = allRequests.filter((r) => r.model === SEARCH_MODEL);
   const pulls = db.query<{ c: number }, [string]>("SELECT COUNT(*) AS c FROM events WHERE run_id = ? AND kind = 'lifecycle' AND name = 'forge_pull'").get(runId)!.c;
   // World time: the stretches while the run was stopped (before a resume or extension) don't count.
   const world = worldTime(db, run, now);
@@ -59,14 +64,14 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
   const wall = (world.segments.at(-1)!.end - run.started_at) / 3_600_000;
   out.push(`- Started ${new Date(run.started_at).toISOString()}, world time ${hours.toFixed(2)} h${gaps.length ? ` (${wall.toFixed(2)} h wall clock; stopped ${gaps.length} time(s) in between)` : ""}`);
   out.push(`- Seed sha256: \`${run.seed_sha256.slice(0, 16)}…\`, CLI versions: \`${run.cli_versions ?? "?"}\`, image: \`${run.image_digest ?? "?"}\``);
-  out.push(`- Wakes: ${allWakes.length} (${allWakes.length - wakes.length} without any API request, excluded below), API requests: ${requests.length}`, "");
+  out.push(`- Wakes: ${allWakes.length} (${allWakes.length - wakes.length} without any API request, excluded below), API requests: ${requests.length}${searchRequests.length ? `, relay web searches: ${searchRequests.length}` : ""}`, "");
 
   out.push("## Totals", "");
   out.push(
     mdTable(
-      ["agent", "runtime / model", "wakes", "spent", "budget", "$/hour", "status"],
+      ["agent", "harness / model", "wakes", "spent", "budget", "$/hour", "status"],
       [
-        ...agents.map((a) => [a.name, `${a.runtime} / ${a.model}`, a.wake_count, $(a.spent_usd), $(a.budget_usd, 2), $(hours > 0 ? a.spent_usd / hours : NaN), a.status]),
+        ...agents.map((a) => [a.name, `${a.harness} / ${a.model}`, a.wake_count, $(a.spent_usd), $(a.budget_usd, 2), $(hours > 0 ? a.spent_usd / hours : NaN), a.status]),
         ["**run**", "", allWakes.length, $(total), swarmBudget !== null ? $(swarmBudget, 2) : "", $(hours > 0 ? total / hours : NaN), run.status],
       ],
     ),
@@ -101,23 +106,65 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
     );
   }
 
-  // Vendor cross-check (Claude reports its own total_cost_usd).
+  // Vendor cross-check (Claude's total_cost_usd, OpenRouter's charges): model requests only, since relay searches
+  // are billed to the wake but never part of the vendor's figure.
   const checked = wakes.filter((w) => w.reported_cost_usd !== null && w.reported_cost_usd > 0);
   if (checked.length) {
-    const ours = checked.reduce((s, w) => s + w.cost_usd, 0);
+    const checkedIds = new Set(checked.map((w) => w.id));
+    const ours = requests.filter((r) => checkedIds.has(r.wake_id)).reduce((s, r) => s + r.cost_usd, 0);
     const theirs = checked.reduce((s, w) => s + w.reported_cost_usd!, 0);
     out.push(`Cross-check on ${checked.length} wake(s) with a vendor-reported cost: computed ${$(ours)} vs reported ${$(theirs)} (${pct(ours / theirs - 1)} difference).`, "");
   }
 
+  // OpenRouter: what each generation was charged and which provider served it (list price vs routed price).
+  const vendor = requests.filter((r) => r.vendor_cost_usd !== null);
+  if (vendor.length) {
+    const byProvider = new Map<string, RequestRow[]>();
+    for (const r of vendor) byProvider.set(r.vendor_provider ?? "?", [...(byProvider.get(r.vendor_provider ?? "?") ?? []), r]);
+    const row = (k: string, rs: RequestRow[]) => {
+      const ours = rs.reduce((s, r) => s + r.cost_usd, 0);
+      const theirs = rs.reduce((s, r) => s + r.vendor_cost_usd!, 0);
+      return [k, rs.length, $(ours), $(theirs), theirs > 0 ? pct(ours / theirs - 1) : "-"];
+    };
+    out.push(
+      `OpenRouter charges on ${vendor.length} request(s) (we compute list prices; the provider a preset routes to may charge less):`,
+      "",
+      mdTable(["served by", "requests", "computed", "charged", "difference"], [...[...byProvider].map(([k, rs]) => row(k, rs)), row("all", vendor)]),
+    );
+  }
+
+  const log = readSearchLog(runSearchDirs(runId).logFile);
+  if (searchRequests.length || log.length) {
+    out.push("## Web search (relay)", "");
+    const ours = searchRequests.reduce((s, r) => s + r.cost_usd, 0);
+    const billedIds = new Set(searchRequests.map((r) => r.request_id));
+    const matched = log.filter((e) => billedIds.has(`search:${e.id}`) && e.exa_cost_usd !== null);
+    const oursMatched = searchRequests.filter((r) => matched.some((e) => `search:${e.id}` === r.request_id)).reduce((s, r) => s + r.cost_usd, 0);
+    const theirs = matched.reduce((s, e) => s + e.exa_cost_usd!, 0);
+    const failed = log.filter((e) => !billed(e));
+    out.push(
+      `${searchRequests.length} search(es) billed, ${$(ours)} computed (in the wake costs above)` +
+        (matched.length ? `; Exa reported ${$(theirs)} for ${matched.length} of them (computed ${$(oursMatched)}, ${pct(oursMatched / theirs - 1)} difference)` : "") +
+        (failed.length ? `; ${failed.length} failed, not billed (${[...new Set(failed.map((e) => e.error?.split(":")[0] ?? "error"))].join(", ")})` : "") +
+        ".",
+      "",
+    );
+    const lat = log.filter(billed).map((e) => e.latency_ms);
+    if (lat.length) out.push(`Latency: median ${n(median(lat))} ms, p90 ${n(quantile(lat, 0.9))} ms.`, "");
+  }
+
+  const fetches = readFetchLog(runSearchDirs(runId).fetchLogFile);
+  if (fetches.length) out.push("## Web fetch (relay)", "", ...fetchSummary(fetches), "");
+
   out.push("## Per wake", "");
   const idle = wakes.filter((w) => w.tool_calls <= IDLE_TOOL_CALLS);
   out.push(mdTable(["set", "wakes", "median", "p90", "total"], [["all wakes", ...stats(wakes)], [`idle floor (≤${IDLE_TOOL_CALLS} tool calls)`, ...stats(idle)]]));
-  const byRuntime = new Map<string, WakeRow[]>();
+  const byHarness = new Map<string, WakeRow[]>();
   for (const w of wakes) {
     const rt = agents.find((a) => a.name === w.agent)?.model ?? "?";
-    byRuntime.set(rt, [...(byRuntime.get(rt) ?? []), w]);
+    byHarness.set(rt, [...(byHarness.get(rt) ?? []), w]);
   }
-  if (byRuntime.size > 1) out.push(mdTable(["model", "wakes", "median", "p90", "total"], [...byRuntime].map(([k, ws]) => [k, ...stats(ws)])));
+  if (byHarness.size > 1) out.push(mdTable(["model", "wakes", "median", "p90", "total"], [...byHarness].map(([k, ws]) => [k, ...stats(ws)])));
 
   out.push("## Overhead share", "");
   const reqByWake = new Map<number, RequestRow[]>();
@@ -196,4 +243,29 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
   } else out.push("_not enough data_", "");
 
   return out.join("\n");
+}
+
+/** Web fetches are free; the report shows what was fetched and what the guard refused (relay log, not the DB). */
+export function fetchSummary(log: FetchLogEntry[]): string[] {
+  const ok = log.filter(fetched);
+  const httpErrors = ok.filter((e) => e.status === null || e.status < 200 || e.status > 299).length;
+  const blocked = log.filter((e) => !fetched(e) && e.blocked);
+  const failed = log.filter((e) => !fetched(e) && !e.blocked);
+  const count = (xs: string[]) => [...xs.reduce((m, x) => m.set(x, (m.get(x) ?? 0) + 1), new Map<string, number>())].sort((a, b) => b[1] - a[1]);
+  const list = (xs: string[], max = 5) => count(xs).slice(0, max).map(([k, v]) => `${k} ${v}`).join(", ");
+  const host = (e: FetchLogEntry) => {
+    try {
+      return new URL(e.final_url ?? e.url).hostname;
+    } catch {
+      return "?";
+    }
+  };
+  const lines = [
+    `${log.length} fetch(es): ${ok.length} answered (${n(ok.reduce((s, e) => s + e.bytes, 0))} bytes${httpErrors ? `, ${httpErrors} with an HTTP error status` : ""}, ${ok.filter((e) => e.raw).length} saved raw)` +
+      `, ${blocked.length} blocked, ${failed.length} failed. By agent: ${list(log.map((e) => e.agent), 20)}.`,
+  ];
+  if (ok.length) lines.push(`Top hosts: ${list(ok.map(host))}.`);
+  if (blocked.length) lines.push(`Blocked: ${list(blocked.map((e) => e.blocked!.replace(/^[^ ]+ (is|resolves)/, "<host> $1").replace(/ \(.*\)$/, "")))}.`);
+  if (failed.length) lines.push(`Failed: ${list(failed.map((e) => (e.error ?? "error").split(":")[0]!))}.`);
+  return lines;
 }

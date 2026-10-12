@@ -1,17 +1,22 @@
-// `just preflight`: plan §11 checks 1–7. Each prints PASS / FAIL / SKIP with a one-line reason.
+// `just preflight`: plan §11 checks 1–7, 8 (pi + OpenRouter), 9 (web search relay) and 10 (web fetch through the relay). Each prints PASS / FAIL / SKIP with a one-line reason.
 // Containers run with the same dockerRunArgs as real wakes; scratch dirs live under data/preflight/.
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadSwarm, type SwarmConfig } from "./config.ts";
+import { OPENROUTER_DOMAIN, loadSwarm, parseAgent, type AgentConfig, type SwarmConfig } from "./config.ts";
 import { fillSeed, SYSTEM_PROMPT_FILE } from "./controller/run.ts";
 import { DATA_DIR } from "./db/index.ts";
-import { dockerRunArgs, imageInfo, MOUNTS } from "./docker.ts";
+import { dockerProcessEnv, dockerRunArgs, imageInfo, MOUNTS, type ContainerSpec } from "./docker.ts";
 import { forgeUrl } from "./forge.ts";
-import { computeCost, loadPricing } from "./pricing/index.ts";
+import { computeCost, loadPricing, parsePricing, searchCost } from "./pricing/index.ts";
+import { generationCosts, prepareOpenRouter } from "./openrouter.ts";
+import { secretEnv } from "./controller/wake.ts";
+import { writePiModels } from "./harnesses/pi.ts";
+import { billed, issueSearchToken, readSearchLog, SEARCH_MODEL, searchDirs, searchEnv, searchHost, startSearch, stopSearch } from "./search.ts";
+import { readFetchLog } from "./webfetch.ts";
 import { AGENT_IMAGE, ensureAgentImage, ensureProxy } from "./proxy.ts";
-import { getAdapter } from "./runtimes/index.ts";
-import type { AgentEvent, RequestUsage, Runtime } from "./types.ts";
+import { getAdapter } from "./harnesses/index.ts";
+import type { AgentEvent, RequestUsage, Harness } from "./types.ts";
 
 type Status = "PASS" | "FAIL" | "SKIP";
 interface Result {
@@ -38,7 +43,7 @@ interface CliRun extends RunOutput {
 }
 
 class Preflight {
-  private readonly root = join(DATA_DIR, "preflight", new Date().toISOString().replace(/[:.]/g, "-"));
+  readonly root = join(DATA_DIR, "preflight", new Date().toISOString().replace(/[:.]/g, "-"));
   private seq = 0;
   /** Outputs shared between checks (1–3 feed 5–7). */
   claudeHi?: CliRun;
@@ -48,8 +53,9 @@ class Preflight {
     mkdirSync(this.root, { recursive: true });
   }
 
-  model(runtime: Runtime): string {
-    return this.cfg.agents.find((a) => a.runtime === runtime)?.model ?? (runtime === "claude" ? "claude-haiku-5-5" : "gpt-6-luna");
+  model(harness: Harness): string {
+    if (harness === "pi") return piAgent(this.cfg).model;
+    return this.cfg.agents.find((a) => a.harness === harness)?.model ?? (harness === "claude" ? "claude-haiku-5-5" : "gpt-6-luna");
   }
 
   agentDirs(agent: string) {
@@ -62,7 +68,7 @@ class Preflight {
   async container(
     agent: string,
     argv: string[],
-    { env = {}, passEnv = [] }: { env?: Record<string, string>; passEnv?: string[] } = {},
+    { env = {}, passEnv = [], noProxy = [] }: { env?: Record<string, string>; passEnv?: NonNullable<ContainerSpec["passEnv"]>; noProxy?: string[] } = {},
   ): Promise<RunOutput> {
     const dirs = this.agentDirs(agent);
     const name = `slopswarm-preflight-${agent}-${process.pid}-${++this.seq}`;
@@ -77,9 +83,10 @@ class Preflight {
       argv,
       network: this.cfg.network.name,
       proxy: this.cfg.network.proxy,
+      noProxy,
       limits: this.cfg.controller.container,
     });
-    const p = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore" });
+    const p = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore", env: dockerProcessEnv({ passEnv }) });
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -94,19 +101,19 @@ class Preflight {
    * Run a CLI inside a container with the adapter's real command line (+ optional extra flags).
    * "lean" (what agents run) uses the filled seed as the system prompt; "stock" keeps the CLI's own.
    */
-  async cli(runtime: Runtime, agent: string, prompt: string, extraArgs: string[] = [], maxTurns = 5, harness: "lean" | "stock" = "lean"): Promise<CliRun> {
-    const adapter = getAdapter(runtime);
+  async cli(harness: Harness, agent: string, prompt: string, extraArgs: string[] = [], maxTurns = 5, setup: "lean" | "stock" = "lean"): Promise<CliRun> {
+    const adapter = getAdapter(harness);
     const dirs = this.agentDirs(agent);
     let systemPrompt: { text: string; file: string } | undefined;
-    if (harness === "lean") {
+    if (setup === "lean") {
       const s = this.cfg.scheduler;
       const text = fillSeed(readFileSync(this.cfg.paths.seed, "utf8"), { name: agent, forgeUrl: forgeUrl("preflight"), maxSleepMs: s.maxSleepMs });
       writeFileSync(join(dirs.runtime, SYSTEM_PROMPT_FILE), text);
       systemPrompt = { text, file: `${MOUNTS.runtime}/${SYSTEM_PROMPT_FILE}` };
     }
-    let argv = adapter.buildCommand({ prompt, model: this.model(runtime), effort: "medium", maxTurns, systemPrompt });
-    if (extraArgs.length) argv = runtime === "codex" ? [...argv.slice(0, -1), ...extraArgs, argv[argv.length - 1]!] : [...argv, ...extraArgs];
-    const passEnv = runtime === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
+    let argv = adapter.buildCommand({ prompt, model: this.model(harness), effort: "medium", maxTurns, systemPrompt });
+    if (extraArgs.length) argv = harness === "codex" ? [...argv.slice(0, -1), ...extraArgs, argv[argv.length - 1]!] : [...argv, ...extraArgs];
+    const passEnv = harness === "pi" ? secretEnv(piAgent(this.cfg)) : harness === "claude" ? ["CLAUDE_CODE_OAUTH_TOKEN"] : [];
     const out = await this.container(agent, argv, { env: adapter.containerEnv(MOUNTS.runtime), passEnv });
     const parser = adapter.newParser();
     const lines = out.stdout.split("\n").filter((l) => l.trim());
@@ -197,6 +204,13 @@ function turnEnd(r: CliRun) {
   return r.events.find((e): e is Extract<AgentEvent, { kind: "turn_end" }> => e.kind === "turn_end");
 }
 
+/** The pi agent the checks use: the config's first, else the sample `config/agents/fern.yaml`. */
+function piAgent(cfg: SwarmConfig): AgentConfig {
+  const a = cfg.agents.find((x) => x.harness === "pi");
+  if (a) return a;
+  return parseAgent(Bun.YAML.parse(readFileSync(join(cfg.paths.configDir, "agents", "fern.yaml"), "utf8")), 1, "agents/fern.yaml");
+}
+
 const hasClaudeToken = () => !!process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
 const hasCodexAuth = () => existsSync(CODEX_AUTH);
 
@@ -257,6 +271,7 @@ async function check3(pf: Preflight): Promise<Result> {
       `echo "example $(code https://example.com)"`,
       `echo "anthropic $(code https://api.anthropic.com/v1/messages)"`,
       `echo "chatgpt $(code https://chatgpt.com/backend-api/codex)"`,
+      `echo "openrouter $(code https://openrouter.ai/api/v1/models)"`,
       `echo "direct $(curl -sS -m 5 --noproxy '*' -o /dev/null https://api.anthropic.com 2>/dev/null; echo rc=$?)"`,
     ].join("\n"),
   ]);
@@ -269,6 +284,8 @@ async function check3(pf: Preflight): Promise<Result> {
   if (!http("anthropic")) problems.push(`api.anthropic.com not reachable via proxy (${line("anthropic")})`);
   if (!http("chatgpt")) problems.push(`chatgpt.com not reachable via proxy (${line("chatgpt")})`);
   if (/rc=0/.test(line("direct"))) problems.push("direct egress without proxy works");
+  const wantsOpenRouter = pf.cfg.network.allowlist.some((d) => d.trim().toLowerCase().replace(/^\*?\./, "") === OPENROUTER_DOMAIN);
+  if (wantsOpenRouter && !http("openrouter")) problems.push(`openrouter.ai not reachable via proxy (${line("openrouter")})`);
   if (problems.length) return fail(problems.join("; "));
   const notes = ["example.com blocked, model APIs reachable only via proxy"];
 
@@ -431,6 +448,113 @@ async function check7(pf: Preflight): Promise<Result> {
   return pass(`first-request prompt: ${notes.join("; ")}`);
 }
 
+async function check8(pf: Preflight): Promise<Result> {
+  const agent = piAgent(pf.cfg);
+  const key = agent.keyEnv ? process.env[agent.keyEnv]?.trim() : undefined;
+  if (!key) return skip(`${agent.keyEnv ?? "the OpenRouter key"} not set in .env`);
+  // What a run does at start: fetched prices and pi's models.json entry.
+  const setup = await prepareOpenRouter([agent], readFileSync(pf.cfg.paths.pricing, "utf8"));
+  writePiModels(pf.agentDirs("pi-hi").runtime, setup.piModels[agent.name]);
+  const r = await pf.cli("pi", "pi-hi", "say hi", [], 3);
+  saveFixture("preflight-pi-hi.jsonl", r.stdout);
+  const end = turnEnd(r);
+  if (r.code !== 0 || end?.reason !== "completed" || !r.usage.length)
+    return fail(`exit ${r.code}, ${end?.reason ?? "no end"}, ${r.usage.length} request(s): ${end?.detail ?? lastLine(r.stderr)}`);
+  const pricing = parsePricing(setup.pricingYaml);
+  const computed = r.usage.reduce((s, u) => s + computeCost(u, pricing).costUsd, 0);
+  const charged = await generationCosts(r.usage.map((u) => u.requestId), key);
+  const theirs = [...charged.values()].reduce((s, v) => s + v.costUsd, 0);
+  const via = [...new Set([...charged.values()].map((v) => v.provider ?? "?"))].join(", ");
+  return pass(
+    `${agent.model}: ${r.usage.length} request(s), computed $${computed.toFixed(6)} (list price) vs charged $${theirs.toFixed(6)} via ${via || "?"} (${charged.size}/${r.usage.length} looked up)`,
+  );
+}
+
+/**
+ * Web search relay (src/search.ts): a relay for a scratch run answers an agent container's `websearch` with a
+ * per-wake token, logs the search, and api.exa.ai stays unreachable from the agent. The Exa leg only with EXA_API_KEY.
+ */
+async function check9(pf: Preflight): Promise<Result> {
+  const runId = `preflight-${process.pid}`;
+  const dirs = searchDirs(join(pf.root, "search"));
+  try {
+    await startSearch({ runId, network: pf.cfg.network.name, dir: dirs.base });
+    const runtime = pf.agentDirs("searcher").runtime;
+    issueSearchToken(dirs, runtime, "searcher", 1);
+    const script =
+      'websearch "Exa search API pricing" --n 2 >/tmp/out 2>/tmp/err; echo "websearch=$?"; head -c 300 /tmp/out; head -c 300 /tmp/err; ' +
+      'curl -s -m 10 -o /dev/null https://api.exa.ai/search; echo "direct=$?"';
+    const out = await pf.container("searcher", ["bash", "-c", script], { env: searchEnv(runId), noProxy: [searchHost(runId)] });
+    const ws = /websearch=(\d+)/.exec(out.stdout)?.[1];
+    const direct = /direct=(\d+)/.exec(out.stdout)?.[1];
+    if (direct === undefined || direct === "0") return fail(`an agent container reached api.exa.ai directly (${lastLine(out.stdout)})`);
+    const logged = readSearchLog(dirs.logFile, 1);
+    if (!logged.length) return fail(`relay logged no search (websearch exit ${ws}: ${lastLine(out.stdout + out.stderr)})`);
+    const key = !!process.env.EXA_API_KEY?.trim();
+    if (!key) {
+      if (ws === "1" && /unavailable/.test(out.stdout)) return pass("relay reachable with a wake token, search logged, Exa unreachable from agents; Exa leg SKIPPED (no EXA_API_KEY)");
+      return fail(`expected "search unavailable" without a key (websearch exit ${ws}: ${lastLine(out.stdout)})`);
+    }
+    const e = logged.at(-1)!;
+    if (ws !== "0" || !billed(e)) return fail(`search failed: ${e.error ?? lastLine(out.stdout)}`);
+    const ours = searchCost({ model: SEARCH_MODEL, type: e.type, results: e.results, pages: e.pages }, loadPricing(pf.cfg.paths.pricing));
+    return pass(`${e.results} result(s) in ${e.latency_ms} ms; cost computed $${ours.toFixed(4)} vs Exa $${e.exa_cost_usd?.toFixed(4) ?? "?"}; Exa unreachable from agents`);
+  } finally {
+    await stopSearch(runId);
+  }
+}
+
+/**
+ * Web fetch (src/webfetch.ts): from an agent container, `webfetch` gets a public page through the relay and is
+ * refused for cloud metadata, loopback, the proxy and the relay itself (Docker names), and private addresses;
+ * a direct `curl` to the same public page is still refused by the egress proxy.
+ */
+async function check10(pf: Preflight): Promise<Result> {
+  const runId = `preflight-wf-${process.pid}`;
+  const dirs = searchDirs(join(pf.root, "webfetch"));
+  const limits = pf.cfg.webfetch ?? { maxBytes: 20 * 1048576, timeoutMs: 30_000, maxRedirects: 5 };
+  const relayHost = searchHost(runId);
+  const blocked: [string, string][] = [
+    ["metadata", "http://169.254.169.254/latest/meta-data/"],
+    ["loopback", "http://127.0.0.1/"],
+    ["dashboard", "http://127.0.0.1:7777/"],
+    ["proxy", "http://slopswarm-proxy:8888/"],
+    ["proxy80", "http://slopswarm-proxy/"],
+    ["relay", `http://${relayHost}/health`],
+    ["private", "http://10.0.0.1/"],
+    ["mapped", "http://[::ffff:127.0.0.1]/"],
+    ["file", "file:///etc/passwd"],
+  ];
+  try {
+    await startSearch({ runId, network: pf.cfg.network.name, dir: dirs.base, webfetch: limits });
+    const runtime = pf.agentDirs("fetcher").runtime;
+    issueSearchToken(dirs, runtime, "fetcher", 1, { search: false });
+    const script = [
+      'webfetch https://example.com/ >/tmp/out 2>/tmp/err; echo "public=$?"; head -c 300 /tmp/out; head -c 300 /tmp/err',
+      'webfetch https://example.com/ -o /tmp/page.html >/dev/null 2>&1; echo "raw=$?"; echo "rawsize=$(wc -c </tmp/page.html)"',
+      ...blocked.map(([k, u]) => `webfetch '${u}' >/dev/null 2>/tmp/e_${k}; echo "${k}=$?"; head -c 200 /tmp/e_${k}; echo`),
+      'websearch "x" >/dev/null 2>/tmp/ws; echo "search=$?"',
+      'curl -s -m 10 -o /dev/null https://example.com/; echo "direct=$?"',
+    ].join("; ");
+    const out = await pf.container("fetcher", ["bash", "-c", script], { env: searchEnv(runId), noProxy: [relayHost] });
+    const code = (k: string) => new RegExp(`^${k}=(\\d+)`, "m").exec(out.stdout)?.[1];
+    if (code("public") !== "0") return fail(`webfetch https://example.com failed (exit ${code("public")}): ${lastLine(out.stdout + out.stderr)}`);
+    if (!/Example Domain/.test(out.stdout)) return fail(`unexpected page text: ${out.stdout.slice(0, 200)}`);
+    if (code("raw") !== "0" || !(Number(/rawsize=\s*(\d+)/.exec(out.stdout)?.[1]) > 0)) return fail(`webfetch -o failed (exit ${code("raw")})`);
+    const notBlocked = blocked.filter(([k]) => code(k) !== "4");
+    if (notBlocked.length) return fail(`not blocked: ${notBlocked.map(([k, u]) => `${u} (exit ${code(k)})`).join(", ")}`);
+    if (code("search") === "0") return fail("a fetch-only token could search");
+    const direct = code("direct");
+    if (direct === undefined || direct === "0") return fail("an agent container reached example.com directly");
+    const log = readFetchLog(dirs.fetchLogFile, 1);
+    if (log.length < 2 + blocked.length) return fail(`relay logged ${log.length} fetch(es), expected ${2 + blocked.length}`);
+    const ok = log.find((e) => e.relay_status === 200)!;
+    return pass(`example.com fetched (${ok.bytes} bytes, ${ok.latency_ms} ms) as text and raw; ${blocked.length} internal/private targets blocked; fetch-only token can't search; direct egress refused`);
+  } finally {
+    await stopSearch(runId);
+  }
+}
+
 const CHECKS: [number, string, (pf: Preflight) => Promise<Result>][] = [
   [1, "Claude in a container (OAuth, --effort)", check1],
   [2, "Codex in a container (auth refresh rotation)", check2],
@@ -439,6 +563,9 @@ const CHECKS: [number, string, (pf: Preflight) => Promise<Result>][] = [
   [5, "Token-field fixtures", check5],
   [6, "Pricing cross-check (Claude ±1%)", check6],
   [7, "Lean harness overhead (stock vs lean system prompt)", check7],
+  [8, "pi + OpenRouter in a container (key, preset, cost cross-check)", check8],
+  [9, "Web search relay (token, log, isolation; Exa with EXA_API_KEY)", check9],
+  [10, "Web fetch through the relay (public page; private, metadata and internal hosts blocked)", check10],
 ];
 
 export async function runPreflight(opts: { swarmPath: string; only?: number[] }): Promise<boolean> {
@@ -450,7 +577,7 @@ export async function runPreflight(opts: { swarmPath: string; only?: number[] })
     console.log(`FAIL  image ${AGENT_IMAGE} not found — run \`just setup\``);
     return false;
   }
-  console.log(`image ${AGENT_IMAGE} (claude ${img.claude ?? "?"}, codex ${img.codex ?? "?"})`);
+  console.log(`image ${AGENT_IMAGE} (claude ${img.claude ?? "?"}, codex ${img.codex ?? "?"}, pi ${img.pi ?? "?"})`);
   await ensureProxy(cfg.network.allowlist);
   const pf = new Preflight(cfg);
   let ok = true;

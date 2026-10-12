@@ -1,0 +1,10 @@
+# Sample OpenRouter agent (not in the default runs): add `fern` to a config's agents list to use it.
+name: fern
+harness: pi                # claude | codex | pi (pi runs OpenRouter models)
+provider: openrouter       # native (default) | openrouter; pi needs openrouter
+# The slug before @ is priced (fetched from OpenRouter's catalogue at run start); the preset, set up in
+# OpenRouter with an empty system prompt, holds the provider routing.
+model: z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash
+key_env: OPEN_ROUTER_API_KEY   # the .env variable with the key (the default); one key per setup is fine
+effort: low                # pi's --thinking; GLM 5.3 has low/high/max (medium runs as high)
+# budget_usd: 3            # optional override of budgets.per_agent_usd

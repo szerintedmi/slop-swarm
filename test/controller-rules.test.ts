@@ -4,7 +4,9 @@ import { loadSwarm, parseSwarm, swarmFromSnapshot } from "../src/config.ts";
 import { isDepleted, overLimit, wakeLimit } from "../src/controller/budget.ts";
 import { fillSeed, humanDuration, makeRunId, wakeNote } from "../src/controller/run.ts";
 import { messagePull, parseNextWake, pickDue, planNextWake } from "../src/controller/scheduler.ts";
+import { pricingForModels } from "../src/controller/self-writer.ts";
 import { wakeStopAt } from "../src/controller/wake.ts";
+import { parsePricing } from "../src/pricing/index.ts";
 
 const MIN = 60_000;
 const sched = { maxSleepMs: 15 * MIN, maxConcurrentWakes: 3 };
@@ -17,8 +19,8 @@ describe("config", () => {
       expect(c.network.allowlist).toContain("api.anthropic.com");
     }
     const smoke = loadSwarm("config/smoke.yaml");
-    expect(smoke.agents.map((a) => a.runtime)).toEqual(["claude", "codex", "codex"]);
-    expect(smoke.scheduler.maxConcurrentWakes).toBe(3); // defaults to the number of agents
+    expect(smoke.agents.map((a) => a.harness)).toEqual(["claude", "codex", "codex", "pi"]);
+    expect(smoke.scheduler.maxConcurrentWakes).toBe(4); // defaults to the number of agents
     expect(smoke.budgets.swarmUsd).toBeGreaterThanOrEqual(smoke.agents.length * smoke.budgets.perAgentUsd);
   });
 
@@ -37,10 +39,13 @@ describe("config", () => {
     scheduler: { max_sleep_min: 15 },
     network: { name: "n", proxy: "http://p:8888", allowlist: ["api.anthropic.com"] },
   });
-  const agent = (o: object = {}) => ({ name: "a1", runtime: "claude", model: "claude-haiku-5-5", ...o });
+  const agent = (o: object = {}) => ({ name: "a1", harness: "claude", model: "claude-haiku-5-5", ...o });
 
   test("validation errors", () => {
-    expect(() => parseSwarm(base(), () => agent({ runtime: "gemini" }))).toThrow(/runtime/);
+    expect(() => parseSwarm(base(), () => agent({ harness: "gemini" }))).toThrow(/harness/);
+    // `runtime:` (the old name) still loads, for config snapshots of earlier runs; both at once is an error.
+    expect(parseSwarm(base(), () => ({ name: "a1", runtime: "codex", model: "m" })).agents[0]!.harness).toBe("codex");
+    expect(() => parseSwarm(base(), () => agent({ runtime: "claude" }))).toThrow(/harness only/);
     expect(() => parseSwarm(base(), () => agent({ name: "Bad Name" }))).toThrow(/name/);
     expect(() => parseSwarm({ ...base(), agents: ["a--b"] }, () => agent({ name: "a--b" }))).toThrow(/--/);
     expect(() => parseSwarm({ ...base(), agents: ["ab-"] }, () => agent({ name: "ab-" }))).toThrow(/name/);
@@ -172,5 +177,46 @@ describe("prompt + status", () => {
     expect(wakeStopAt(55 * MIN, 10 * MIN, end, MIN)).toEqual({ at: 61 * MIN, atWorldEnd: true });
     expect(wakeStopAt(51 * MIN, 10 * MIN, end, MIN)).toEqual({ at: 61 * MIN, atWorldEnd: false }); // tie: the timeout
     expect(wakeStopAt(59 * MIN, 10 * MIN, end, 0)).toEqual({ at: 60 * MIN, atWorldEnd: true });
+  });
+});
+
+describe("pricingForModels (/self/pricing.yaml)", () => {
+  const full = readFileSync("config/pricing.yaml", "utf8");
+  const header = full.slice(0, full.indexOf("models:"));
+  const names = (y: string) => Object.keys(parsePricing(y).models).sort();
+
+  test("an agent on one model sees only that model, with the header and its comments", () => {
+    const y = pricingForModels(full, ["gpt-6-luna"]);
+    expect(names(y)).toEqual(["gpt-6-luna"]);
+    expect(y).toStartWith(header);
+    expect(y).toContain("# Source: developers.openai.com");
+    expect(y).not.toContain("claude-haiku-5-5");
+    expect(parsePricing(y).models["gpt-6-luna"]).toEqual(parsePricing(full).models["gpt-6-luna"]!);
+  });
+
+  test("extra billed models are included; unknown models are omitted", () => {
+    expect(names(pricingForModels(full, ["claude-haiku-5-5", "gpt-6-luna", "mystery"]))).toEqual(["claude-haiku-5-5", "gpt-6-luna"]);
+    // No known model at all (can't happen for a real agent: its configured model is costed) -> empty map.
+    const none = pricingForModels(full, ["mystery"]);
+    expect(Bun.YAML.parse(none)).toEqual({ models: {} });
+    expect(none).toStartWith(header);
+  });
+
+  test("relay search prices only for agents that may search; the section and its comments go otherwise", () => {
+    const without = pricingForModels(full, ["gpt-6-luna"]);
+    expect((Bun.YAML.parse(without) as Record<string, unknown>).search).toBeUndefined();
+    expect(without).not.toContain("Web search through the run's relay");
+    const withSearch = pricingForModels(full, ["gpt-6-luna", "exa-search"]);
+    expect(parsePricing(withSearch).search["exa-search"]).toEqual(parsePricing(full).search["exa-search"]!);
+    expect(withSearch).toContain("# Web search through the run's relay");
+    expect(names(withSearch)).toEqual(["gpt-6-luna"]);
+  });
+
+  test("falls back to re-emitted YAML (header kept) when the layout can't be filtered as text", () => {
+    const flow = "# units: USD/Mtok\nmodels: {a: {per_mtok: {input: 1, output: 2, cache_read: 0.1}}, b: {per_mtok: {input: 3, output: 4, cache_read: 0.3}}}\n";
+    const y = pricingForModels(flow, ["b"]);
+    expect(y).toStartWith("# units: USD/Mtok\n");
+    expect(names(y)).toEqual(["b"]);
+    expect(parsePricing(y).models.b!.perMtok.output).toBe(4);
   });
 });

@@ -1,11 +1,17 @@
 // The agents' public outlet (plan §4.6): one GitHub org, reached through one account they all share.
-// The token lives in a file under secrets/; the controller writes gh's login from it each wake, and git
-// gets its GitHub credentials from gh. Nothing goes through the container env, so it never shows in `docker run` args.
+// The token is SWARM_GITHUB_TOKEN in .env (not GITHUB_TOKEN/GH_TOKEN, which gh and git on the host would pick up
+// and act as the agents' account). The controller writes gh's login from it each wake, and git gets its GitHub
+// credentials from gh. The token never goes into the container env, so it never shows in `docker run` args.
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { MOUNTS } from "./docker.ts";
 
-export const GITHUB_TOKEN_PATH = join(import.meta.dir, "..", "secrets", "github", "token");
+export const GITHUB_TOKEN_ENV = "SWARM_GITHUB_TOKEN";
+
+/** The agents' shared GitHub token from .env, or undefined if unset. Read per wake. */
+export function githubTokenFromEnv(): string | undefined {
+  return process.env[GITHUB_TOKEN_ENV]?.trim() || undefined;
+}
 
 /** Files in an agent's runtime dir (mounted at /runtime) that log gh and git in to GitHub. */
 export function githubLoginPaths(runtimeDir: string) {

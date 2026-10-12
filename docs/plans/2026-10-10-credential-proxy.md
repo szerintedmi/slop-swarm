@@ -44,8 +44,8 @@ agent container ──http──▶ credproxy (internal) ──https──▶ ap
 
 - `docker/credproxy/` (Bun, a few dozen lines): two upstream routes, dummy→agent map from a file the controller writes, header swap, streamed pass-through, Codex refresh.
 - `docker/compose.yaml`: the service on `internal` + `egress`. Its own allowlist is fixed to the model domains.
-- `src/controller/wake.ts`: per-runtime env (`ANTHROPIC_BASE_URL`, dummy tokens) instead of passing the real ones; no more copying `auth.json`.
-- `config/*.yaml`: drop the model domains from `network.allowlist`. A per-agent (or per-runtime) allowlist only if the Codex fallback is needed.
+- `src/controller/wake.ts`: per-harness env (`ANTHROPIC_BASE_URL`, dummy tokens) instead of passing the real ones; no more copying `auth.json`.
+- `config/*.yaml`: drop the model domains from `network.allowlist`. A per-agent (or per-harness) allowlist only if the Codex fallback is needed.
 - Spec §7.2: replace the "accepted for the probe" row.
 - Preflight: a check that the container env and mounts hold no real credential (grep for the known token prefixes), and that a direct `curl https://api.anthropic.com` from the container is refused.
 

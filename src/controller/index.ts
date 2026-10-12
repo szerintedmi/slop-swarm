@@ -7,10 +7,10 @@ import type { SwarmConfig } from "../config.ts";
 import { agentDirs, getRun, type RunRow } from "../db/index.ts";
 import { dockerKillLabelled } from "../docker.ts";
 import type { ForgeApi } from "../forge.ts";
-import { GITHUB_TOKEN_PATH } from "../github.ts";
 import { AGENT_IMAGE } from "../proxy.ts";
 import { parsePricing, type PricingTable } from "../pricing/index.ts";
-import { getAdapter } from "../runtimes/index.ts";
+import { getAdapter } from "../harnesses/index.ts";
+import { readSearchLog, revokeSearchToken, runSearchDirs, searchRows } from "../search.ts";
 import type { RequestUsage } from "../types.ts";
 import { describeExtension, extraSwarmUsd, parseExtendDetail } from "../world.ts";
 import { DEPLETED_EPSILON_USD, isDepleted } from "./budget.ts";
@@ -37,6 +37,8 @@ export class Controller {
   private swarmUsd: number;
   private readonly pricing: PricingTable;
   private readonly running = new Map<string, WakeHandle>();
+  /** OpenRouter cost cross-checks still running after their wakes ended (they hold no scheduler slot). */
+  private readonly vendorChecks = new Set<Promise<void>>();
   private readonly pauseAfterWake = new Set<string>();
   private stopping = false;
   private killed = false;
@@ -69,7 +71,6 @@ export class Controller {
       swarmBudgetUsd: this.swarmUsd,
       image: AGENT_IMAGE,
       codexAuthPath: CODEX_AUTH_PATH,
-      githubTokenPath: GITHUB_TOKEN_PATH,
       forge: this.opts.forge,
       now: this.now,
       ...this.opts.wakeDeps,
@@ -98,7 +99,10 @@ export class Controller {
 
   /** Resolves when every running wake has finished (tests, shutdown). */
   async whenIdle(): Promise<void> {
-    while (this.running.size) await Promise.all([...this.running.values()].map((h) => h.done));
+    while (this.running.size || this.vendorChecks.size) {
+      await Promise.all([...this.running.values()].map((h) => h.done));
+      await Promise.all(this.vendorChecks);
+    }
   }
 
   /** Clean up after a controller crash: close wakes left open and bill what they used. */
@@ -108,7 +112,7 @@ export class Controller {
     if (!this.opts.wakeDeps?.killContainer) await dockerKillLabelled({ runId: this.run.id });
     for (const w of open) {
       const a = this.repo.agent(w.agent);
-      const adapter = getAdapter(a.runtime);
+      const adapter = getAdapter(a.harness);
       let usage: RequestUsage[] = [];
       let sessionId = w.session_id ?? undefined;
       try {
@@ -126,12 +130,19 @@ export class Controller {
           streamed: [...streamed.values()],
           stdoutLines: lines,
           wakeStartedAt: w.started_at,
+          billedRequestIds: this.repo.billedRequestIds(a.name, w.id),
           previousWakeStdoutLines: w.resumed ? previousSessionLines(this.repo.finishedWakes(a.name), sessionId) : undefined,
         });
       } catch {
         /* bill nothing we cannot see */
       }
-      const { rows, total: cost } = costAll(this.pricing, usage);
+      const llm = costAll(this.pricing, usage);
+      // Relay searches of the wake (src/search.ts) are billed too; its token stops working.
+      const search = runSearchDirs(this.run.id);
+      revokeSearchToken(search, w.id);
+      const searched = searchRows(this.pricing, readSearchLog(search.logFile, w.id));
+      const rows = [...llm.rows, ...searched.rows];
+      const cost = llm.total + searched.total;
       this.repo.replaceRequests(w.id, a.name, rows);
       const endedAt = this.now();
       // Honour a next_wake.yaml written during the wake (the agent finished its turn before the crash).
@@ -143,7 +154,7 @@ export class Controller {
         ended_at: endedAt,
         exit_reason: "error",
         cost_usd: cost,
-        requests: rows.length,
+        requests: llm.rows.length,
         session_id: sessionId ?? null,
         next_in_minutes: req?.inMinutes ?? null,
         continue_requested: req ? (req.continueSession ? 1 : 0) : null,
@@ -317,6 +328,10 @@ export class Controller {
       this.log(`wake ${a.name}#${a.wake_count + 1} (${trigger})`);
       void h.done.then((o) => {
         this.log(`done ${a.name}#${a.wake_count + 1}: ${o.exitReason}, $${o.costUsd.toFixed(4)}`);
+        if (o.vendorCheck) {
+          const check = o.vendorCheck.finally(() => this.vendorChecks.delete(check));
+          this.vendorChecks.add(check);
+        }
         this.onWakeDone(h);
       });
     }
@@ -348,5 +363,7 @@ export class Controller {
       this.wakeup = null;
     }
     await this.polling;
+    // Bounded (VENDOR_CHECK_MS); their numbers land in the report.
+    await Promise.all(this.vendorChecks);
   }
 }

@@ -3,6 +3,8 @@ FROM node:22-bookworm-slim
 
 ARG CLAUDE_CODE_VERSION=2.1.296
 ARG CODEX_VERSION=0.162.1
+# pi (OpenRouter agents); needs Node >= 22.19, which node:22 has.
+ARG PI_VERSION=1.1.0
 # Gitea's CLI, for the run's forge (plan §4.5). Checksums of the release's .xz assets.
 ARG TEA_VERSION=0.16.0
 ARG TEA_SHA256_ARM64=7ebeb8783ac0d69a1cac545e5a0d8f0c7dd7d6e943e73b32dfc051ef7686a60b
@@ -14,7 +16,7 @@ ARG GH_SHA256_AMD64=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b0202930
 ARG TARGETARCH
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git python3 curl ca-certificates jq ripgrep procps xz-utils \
+ && apt-get install -y --no-install-recommends git python3 curl ca-certificates jq ripgrep procps xz-utils poppler-utils \
  && rm -rf /var/lib/apt/lists/*
 
 RUN case "${TARGETARCH}" in arm64) sum="${TEA_SHA256_ARM64}" ;; amd64) sum="${TEA_SHA256_AMD64}" ;; *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; esac \
@@ -27,14 +29,18 @@ RUN case "${TARGETARCH}" in arm64) sum="${GH_SHA256_ARM64}" ;; amd64) sum="${GH_
  && echo "${sum}  /tmp/gh.tgz" | sha256sum -c - \
  && tar -xzf /tmp/gh.tgz -C /tmp && install -m 0755 "/tmp/gh_${GH_VERSION}_linux_${TARGETARCH}/bin/gh" /usr/local/bin/gh && rm -rf /tmp/gh.tgz /tmp/gh_*
 
-RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" "@earendil-works/pi-coding-agent@${PI_VERSION}" \
  && npm cache clean --force
+
+# Web search and web fetch through the run's relay (src/search.ts, src/webfetch.ts), for any harness.
+COPY --chmod=0755 websearch webfetch /usr/local/bin/
 
 # node:22 ships a `node` user with uid 1000; rename it to `agent` so files on the bind mounts line up.
 RUN usermod -l agent -d /home/agent -m node && groupmod -n agent node
 
 LABEL org.slopswarm.claude-code="${CLAUDE_CODE_VERSION}" \
       org.slopswarm.codex="${CODEX_VERSION}" \
+      org.slopswarm.pi="${PI_VERSION}" \
       org.slopswarm.tea="${TEA_VERSION}" \
       org.slopswarm.gh="${GH_VERSION}"
 
@@ -52,7 +58,10 @@ ENV HOME=/home/agent \
     DISABLE_AUTOUPDATER=1 \
     GH_NO_UPDATE_NOTIFIER=1 \
     GH_PROMPT_DISABLED=1 \
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    PI_OFFLINE=1 \
+    PI_SKIP_VERSION_CHECK=1 \
+    PI_TELEMETRY=0
 
 USER agent
 WORKDIR /home/agent

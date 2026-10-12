@@ -3,8 +3,8 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { computeCost, loadPricing, sumUsage } from "../src/pricing/index.ts";
-import { getAdapter } from "../src/runtimes/index.ts";
-import type { AgentEvent, RequestUsage, RuntimeAdapter } from "../src/types.ts";
+import { getAdapter } from "../src/harnesses/index.ts";
+import type { AgentEvent, RequestUsage, HarnessAdapter } from "../src/types.ts";
 
 const FX = join(import.meta.dir, "fixtures");
 const pricing = loadPricing(join(import.meta.dir, "..", "config", "pricing.yaml"));
@@ -19,7 +19,7 @@ function tmp() {
 }
 
 /** Mimics the controller: feed every line, keep the last usage per requestId in first-seen order. */
-function run(adapter: RuntimeAdapter, stdout: string[], model?: string) {
+function run(adapter: HarnessAdapter, stdout: string[], model?: string) {
   const parser = adapter.newParser({ model });
   const events: AgentEvent[] = [];
   const streamed = new Map<string, RequestUsage>();
@@ -91,6 +91,15 @@ describe("claude adapter", () => {
     expect(argv[argv.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit,WebSearch");
     expect(argv[argv.indexOf("-p") + 1]).toBe("[Wake at …]");
     expect(claude.buildCommand({ prompt: "hi", model: "m", effort: "medium", maxTurns: 5 })).not.toContain("--system-prompt");
+  });
+
+  test("buildCommand: on the relay (nativeSearch false) WebSearch is off, lean or stock", () => {
+    const lean = claude.buildCommand({ prompt: "hi", model: "m", effort: "medium", maxTurns: 5, systemPrompt: { text: "s", file: "/x" }, nativeSearch: false });
+    expect(lean[lean.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit");
+    expect(lean).not.toContain("--disallowedTools");
+    const stock = claude.buildCommand({ prompt: "hi", model: "m", effort: "medium", maxTurns: 5, nativeSearch: false });
+    expect(stock[stock.indexOf("--disallowedTools") + 1]).toBe("WebSearch");
+    expect(claude.searchModes).toEqual(["native", "relay"]);
   });
 
   test("buildCommand", () => {
@@ -231,6 +240,15 @@ describe("codex adapter", () => {
     }
   });
 
+  test("buildCommand: on the relay (nativeSearch false) Codex's web search is disabled, also on resume", () => {
+    for (const resumeSessionId of [undefined, "T1"]) {
+      const argv = codex.buildCommand({ prompt: "hi", model: "gpt-6-luna", effort: "medium", maxTurns: 60, resumeSessionId, nativeSearch: false });
+      expect(argv).toContain('web_search="disabled"');
+      expect(argv).not.toContain('web_search="live"');
+    }
+    expect(codex.searchModes).toEqual(["native", "relay"]);
+  });
+
   test("parses the say-hi stream and normalises input (input includes cached)", () => {
     const { events, streamed } = run(codex, lines("codex-hi.jsonl"), "gpt-6-luna");
     expect(events[0]).toEqual({ kind: "session", sessionId: "01a12507-767d-7fb1-bfb5-ede93d67f174" });
@@ -313,6 +331,111 @@ describe("codex adapter", () => {
     ]);
   });
 
+});
+
+describe("pi adapter", () => {
+  const pi = getAdapter("pi");
+  const PRESET = "z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash";
+  const SID = "pi-fixture-1";
+
+  function runtimeWithSession() {
+    const dir = tmp();
+    mkdirSync(join(dir, "sessions"), { recursive: true });
+    copyFileSync(join(FX, "pi-session.jsonl"), join(dir, "sessions", `2026-10-11T21-29-34-942Z_${SID}.jsonl`));
+    return dir;
+  }
+
+  test("buildCommand: lean harness, OpenRouter model string passed literally, resume by session id", () => {
+    const sp = { text: "You are fern.", file: "/runtime/system-prompt.md" };
+    const fresh = pi.buildCommand({ prompt: "[Wake 1 …]", model: PRESET, effort: "low", maxTurns: 60, systemPrompt: sp });
+    expect(fresh.slice(0, 9)).toEqual(["pi", "--mode", "json", "--provider", "openrouter", "--model", PRESET, "--thinking", "low"]);
+    expect(fresh[fresh.indexOf("--system-prompt") + 1]).toBe("/runtime/system-prompt.md");
+    expect(fresh[fresh.indexOf("--session-dir") + 1]).toBe("/runtime/sessions");
+    expect(fresh[fresh.indexOf("--tools") + 1]).toBe("read,bash,edit,write");
+    for (const f of ["--no-context-files", "--no-extensions", "--no-mcp", "--no-skills", "--offline"]) expect(fresh).toContain(f);
+    expect(fresh).not.toContain("--session-id");
+    expect(fresh.slice(-2)).toEqual(["--", "[Wake 1 …]"]);
+    const resumed = pi.buildCommand({ prompt: "hi", model: PRESET, effort: "low", maxTurns: 60, resumeSessionId: SID });
+    expect(resumed[resumed.indexOf("--session-id") + 1]).toBe(SID);
+    expect(pi.containerEnv("/runtime")).toMatchObject({ PI_CODING_AGENT_DIR: "/runtime/pi", PI_OFFLINE: "1", PI_TELEMETRY: "0" });
+    expect(pi.maxTurnsBy).toBe("turns");
+    expect(pi.searchModes).toEqual(["relay"]);
+  });
+
+  test("parses the real say-hi stream: one request priced as the slug before @ (input excludes cache)", async () => {
+    const stdout = lines("pi-hi.jsonl");
+    const { events, streamed } = run(pi, stdout, PRESET);
+    expect(events[0]).toMatchObject({ kind: "session", sessionId: SID });
+    expect(events.filter((e) => e.kind === "turn_start")).toEqual([{ kind: "turn_start", n: 1 }]);
+    expect(events.some((e) => e.kind === "reasoning")).toBe(true);
+    expect(events.find((e) => e.kind === "message")).toMatchObject({ role: "assistant" });
+    expect(streamed).toEqual([
+      { requestId: "gen-1791754175-7XX88bo8xF7c2YEBkz9E", model: "z-ai/glm-5.3-flash", freshInput: 1147, cacheRead: 0, cacheWrite5m: 0, cacheWrite1h: 0, output: 178, reasoning: 114, webSearches: 0, ts: "2026-10-11T21:29:34.996Z" },
+    ]);
+    expect(events.at(-1)).toEqual({ kind: "turn_end", reason: "completed", numTurns: 1, detail: undefined });
+    // Without the session file, the stream is final.
+    expect(await pi.finalizeUsage({ runtimeDir: tmp(), sessionId: SID, streamed, stdoutLines: stdout })).toEqual(streamed);
+  });
+
+  test("resumed wake with a tool call: tool events, implicit cache reads, session file limited to this wake", async () => {
+    const stdout = lines("pi-resume-wake2.jsonl");
+    const { events, streamed } = run(pi, stdout, PRESET);
+    expect(events.filter((e) => e.kind === "turn_start")).toHaveLength(2);
+    const call = events.find((e) => e.kind === "tool_call") as Extract<AgentEvent, { kind: "tool_call" }>;
+    expect(call).toMatchObject({ name: "bash", args: JSON.stringify({ command: "echo hello > note.txt && cat note.txt" }) });
+    expect(events.find((e) => e.kind === "tool_result")).toEqual({ kind: "tool_result", id: call.id, ok: true, summary: "hello\n" });
+    expect(streamed.map((u) => [u.freshInput, u.cacheRead, u.output])).toEqual([[585, 768, 19], [34, 1344, 3]]);
+
+    const dir = runtimeWithSession();
+    // The session file holds both wakes; only records from this wake count.
+    const all = await pi.finalizeUsage({ runtimeDir: dir, sessionId: SID, streamed: [], stdoutLines: [] });
+    expect(all.map((u) => u.requestId)).toEqual(["gen-1791754175-7XX88bo8xF7c2YEBkz9E", ...streamed.map((u) => u.requestId)]);
+    const wake2 = await pi.finalizeUsage({ runtimeDir: dir, sessionId: SID, streamed, stdoutLines: stdout, wakeStartedAt: Date.parse("2026-10-11T21:29:45Z") });
+    expect(wake2.map(({ ts: _ts, ...u }) => u)).toEqual(streamed.map(({ ts: _ts, ...u }) => u));
+    // Resumed within the clock slack of the previous wake's last request: its billed ids are skipped.
+    const quick = { runtimeDir: dir, sessionId: SID, streamed, stdoutLines: stdout, wakeStartedAt: Date.parse("2026-10-11T21:29:38Z") };
+    expect((await pi.finalizeUsage(quick)).map((u) => u.requestId)).toContain("gen-1791754175-7XX88bo8xF7c2YEBkz9E");
+    const billed = new Set(["gen-1791754175-7XX88bo8xF7c2YEBkz9E"]);
+    expect((await pi.finalizeUsage({ ...quick, billedRequestIds: billed })).map((u) => u.requestId)).toEqual(streamed.map((u) => u.requestId));
+  });
+
+  test("failed requests: pi exits 0, but the wake ends in error with no billable usage (real run)", () => {
+    // The custom-id fallback sent max_tokens the provider rejected; pi retried three times and gave up.
+    const { events, streamed } = run(pi, lines("pi-error.jsonl"), PRESET);
+    expect(streamed.every((u) => u.freshInput + u.output === 0)).toBe(true);
+    expect(events.some((e) => e.kind === "message" && e.role === "user" && e.text.startsWith("[pi error] 400"))).toBe(true);
+    const end = events.at(-1) as Extract<AgentEvent, { kind: "turn_end" }>;
+    expect(end.reason).toBe("error");
+    expect(end.detail).toContain("400");
+  });
+
+  test("compaction usage counts as a request; cache writes split by TTL; garbage is ignored", async () => {
+    const usage = { input: 100, output: 10, cacheRead: 50, cacheWrite: 30, cacheWrite1h: 20, reasoning: 4, totalTokens: 190 };
+    const stdout = [
+      "not json",
+      JSON.stringify({ type: "session", version: 3, id: "s1", cwd: "/home/agent" }),
+      JSON.stringify({ type: "compaction_end", reason: "threshold", result: { summary: "…", usage }, aborted: false, willRetry: false }),
+      JSON.stringify({ type: "message_end", message: { role: "assistant", content: [], model: PRESET, usage, stopReason: "stop" } }),
+      JSON.stringify({ type: "agent_settled", aborted: false }),
+    ];
+    const { events, streamed } = run(pi, stdout, PRESET);
+    expect(streamed.map((u) => u.requestId)).toEqual(["compaction-1", "pi-1"]);
+    expect(streamed[0]).toMatchObject({ model: "z-ai/glm-5.3-flash", freshInput: 100, cacheRead: 50, cacheWrite5m: 10, cacheWrite1h: 20, output: 10, reasoning: 4 });
+    expect(events.at(-1)).toMatchObject({ kind: "turn_end", reason: "completed", numTurns: 0 });
+
+    // The session file's compaction entry replaces the streamed one; other streamed requests are kept.
+    const dir = tmp();
+    mkdirSync(join(dir, "sessions"));
+    writeFileSync(
+      join(dir, "sessions", "2026-10-11T00-00-00-000Z_s1.jsonl"),
+      [
+        JSON.stringify({ type: "session", version: 3, id: "s1", timestamp: "2026-10-11T00:00:00.000Z" }),
+        JSON.stringify({ type: "compaction", id: "c0ffee00", timestamp: "2026-10-11T00:00:01.000Z", summary: "…", firstKeptEntryId: "x", tokensBefore: 1, usage }),
+      ].join("\n"),
+    );
+    const final = await pi.finalizeUsage({ runtimeDir: dir, sessionId: "s1", streamed, stdoutLines: stdout });
+    expect(final.map((u) => u.requestId)).toEqual(["compaction:c0ffee00", "pi-1"]);
+  });
 });
 
 describe("reasoning summaries (real container output)", () => {

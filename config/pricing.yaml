@@ -34,3 +34,22 @@ models:
       web_search: 0.01        # $10 / 1K calls; search content tokens are billed as normal input
     output_includes_reasoning: true   # verified: total_tokens = input + output (pre-flight §11.5)
     # Source: developers.openai.com/api/docs/models/gpt-6-luna and /api/docs/pricing, checked 2026-10-10.
+
+# Web search through the run's relay (`websearch` in the agent image; src/search.ts). Priced per search,
+# not per token: base price for the search type (up to `included_results` results), plus each result
+# above that, plus each returned page per content type. The relay asks for highlights only.
+# Exa's own costDollars.total is logged beside ours as the cross-check.
+search:
+  exa-search:
+    provider: exa
+    per_request_usd:
+      auto: 0.007             # $7 / 1K requests (auto and fast, 1-10 results)
+      fast: 0.007
+    included_results: 10
+    per_extra_result_usd: 0.001   # $1 / 1K results above 10
+    per_page_usd:             # $1 / 1K pages per content type
+      highlights: 0           # Not billed per page on /search: a live search with highlights for 2 results
+                              # cost $0.007 (costDollars.total), not $0.009 (checked 2026-10-11, live costDollars).
+      text: 0.001             # text and summary: the pricing page's /contents price, unverified on /search
+      summary: 0.001          # (the relay doesn't ask for them).
+    # Source: exa.ai/pricing and exa.ai/docs/reference/search, checked 2026-10-11.

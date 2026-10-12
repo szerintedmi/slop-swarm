@@ -1,6 +1,6 @@
 // Claude Code adapter: `claude -p --output-format stream-json --verbose` (plan §3, §8).
 import { join } from "node:path";
-import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, RuntimeAdapter, StreamParser } from "../types.ts";
+import type { AgentEvent, CommandOptions, FinalizeContext, RequestUsage, HarnessAdapter, StreamParser } from "../types.ts";
 import { findFiles, n, parseJsonLine, readJsonLines, short } from "./util.ts";
 
 /** Claude `input_tokens` EXCLUDES cache tokens; cache writes are split by TTL. */
@@ -86,12 +86,18 @@ class ClaudeParser implements StreamParser {
   }
 }
 
-/** Tools for the lean harness. WebFetch is left out: it fetches client-side and the proxy blocks it. */
+/**
+ * Tools for the lean harness. WebFetch is left out: it fetches client-side and the proxy blocks it. Agents read
+ * pages with the `webfetch` CLI through the run's relay instead, when the world has `webfetch:` (src/webfetch.ts).
+ */
 export const LEAN_TOOLS = "Bash,Read,Write,Edit,WebSearch";
+/** The lean tools without Claude Code's own web search, for agents on the relay (`search: relay`). */
+export const LEAN_TOOLS_NO_SEARCH = LEAN_TOOLS.split(",").filter((t) => t !== "WebSearch").join(",");
 
-export const claudeAdapter: RuntimeAdapter = {
-  runtime: "claude",
+export const claudeAdapter: HarnessAdapter = {
+  harness: "claude",
   reportedCostIsCumulative: true,
+  searchModes: ["native", "relay"],
 
   buildCommand(o: CommandOptions): string[] {
     return [
@@ -115,7 +121,8 @@ export const claudeAdapter: RuntimeAdapter = {
       "--thinking-display",
       "summarized",
       // Lean harness: our seed replaces Claude Code's system prompt, and only these tools are exposed.
-      ...(o.systemPrompt ? ["--system-prompt", o.systemPrompt.text, "--tools", LEAN_TOOLS] : []),
+      ...(o.systemPrompt ? ["--system-prompt", o.systemPrompt.text, "--tools", o.nativeSearch === false ? LEAN_TOOLS_NO_SEARCH : LEAN_TOOLS] : []),
+      ...(!o.systemPrompt && o.nativeSearch === false ? ["--disallowedTools", "WebSearch"] : []),
       ...(o.resumeSessionId ? ["--resume", o.resumeSessionId] : []),
     ];
   },

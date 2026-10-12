@@ -18,12 +18,13 @@ export function makeRunId(name: string, now = Date.now()): string {
 export function createRun(
   db: Database,
   cfg: SwarmConfig,
-  meta: { cliVersions?: Record<string, string | undefined>; imageDigest?: string },
+  /** `pricingYaml`: the pricing snapshot (config/pricing.yaml plus fetched OpenRouter prices); default: the file. */
+  meta: { cliVersions?: Record<string, string | undefined>; imageDigest?: string; pricingYaml?: string },
   now = Date.now(),
 ): string {
   const id = makeRunId(cfg.run.name, now);
   const seed = readFileSync(cfg.paths.seed, "utf8");
-  const pricing = readFileSync(cfg.paths.pricing, "utf8");
+  const pricing = meta.pricingYaml ?? readFileSync(cfg.paths.pricing, "utf8");
 
   for (const a of cfg.agents) {
     const d = agentDirs(id, a.name);
@@ -36,11 +37,11 @@ export function createRun(
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
     ).run(id, cfg.run.name, cfg.snapshot, sha256(seed), seed, pricing, JSON.stringify(meta.cliVersions ?? {}), meta.imageDigest ?? null, now, now + cfg.run.maxDurationMs);
     const ins = db.query(
-      `INSERT INTO agents (run_id, name, runtime, model, effort, budget_usd, status, next_wake_at, next_trigger)
+      `INSERT INTO agents (run_id, name, harness, model, effort, budget_usd, status, next_wake_at, next_trigger)
        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'initial')`,
     );
     // Everyone is due at once; max_concurrent_wakes spreads them out.
-    for (const a of cfg.agents) ins.run(id, a.name, a.runtime, a.model, a.effort, a.budgetUsd, now);
+    for (const a of cfg.agents) ins.run(id, a.name, a.harness, a.model, a.effort, a.budgetUsd, now);
     db.query("INSERT INTO events (run_id, ts, kind, name, detail) VALUES (?, ?, 'lifecycle', 'run_created', ?)").run(id, now, cfg.paths.swarm);
   })();
   return id;
