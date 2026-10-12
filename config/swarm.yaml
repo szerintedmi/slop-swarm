@@ -29,14 +29,14 @@ network:
     - api.openai.com
     - auth.openai.com
     - openrouter.ai           # OpenRouter models (pi agents) and the generation cost lookup
-    - github.com              # the GitHub outlet (github: below); covers api. and uploads.
+    - github.com              # public GitHub, read-only without the github: outlet below; covers api. and uploads.
     - githubusercontent.com   # raw files, release assets
 
-# The agents' public outlet (plan §4.6): one org, one account they all share. Token: secrets/github/token.
-# Remove this section and the two github domains above to run without it.
-github:
-  org: slop-swarm
-  user: slop-swarm-agents
+# The agents' public outlet (plan §4.6): one org, one account they all share. Token: SWARM_GITHUB_TOKEN in .env.
+# Off for now: the org keeps repos between runs, so a new run would start from earlier runs' work.
+# github:
+#   org: slop-swarm
+#   user: slop-swarm-agents
 
 # Agents' `webfetch <url>` (any harness): GET-only downloads of public URLs, done by the run's relay; agents never
 # connect out themselves and the allowlist above stays as it is. Remove this section to turn it off.
