@@ -106,10 +106,12 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
     );
   }
 
-  // Vendor cross-check (Claude reports its own total_cost_usd).
+  // Vendor cross-check (Claude's total_cost_usd, OpenRouter's charges): model requests only, since relay searches
+  // are billed to the wake but never part of the vendor's figure.
   const checked = wakes.filter((w) => w.reported_cost_usd !== null && w.reported_cost_usd > 0);
   if (checked.length) {
-    const ours = checked.reduce((s, w) => s + w.cost_usd, 0);
+    const checkedIds = new Set(checked.map((w) => w.id));
+    const ours = requests.filter((r) => checkedIds.has(r.wake_id)).reduce((s, r) => s + r.cost_usd, 0);
     const theirs = checked.reduce((s, w) => s + w.reported_cost_usd!, 0);
     out.push(`Cross-check on ${checked.length} wake(s) with a vendor-reported cost: computed ${$(ours)} vs reported ${$(theirs)} (${pct(ours / theirs - 1)} difference).`, "");
   }

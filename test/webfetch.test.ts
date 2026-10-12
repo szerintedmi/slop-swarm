@@ -667,12 +667,15 @@ describe("wakes", () => {
         const entry = { id: "s1", ts: new Date(T0).toISOString(), agent, wake, query: "q", params: {}, type: "auto", results: 1, pages: {}, exa_cost_usd: 0.007, latency_ms: 1, status: 200, error: null };
         writeFileSync(d.logFile, JSON.stringify(entry) + "\n");
       },
-      async (ids) => new Map(ids.map((id) => [id, { costUsd: 0.00003, provider: "StreamLake" }])),
+      // Charged exactly our computed model cost: 1147 input and 178 output tokens at $0.15 / $0.50 per Mtok.
+      async (ids) => new Map(ids.map((id) => [id, { costUsd: 0.00026105, provider: "StreamLake" }])),
     );
     const w = r.db.query<{ id: number; reported_cost_usd: number | null }, []>("SELECT id, reported_cost_usd FROM wakes WHERE agent = 'fern'").get()!;
     const models = r.db.query<{ model: string }, [number]>("SELECT model FROM requests WHERE wake_id = ? ORDER BY seq").all(w.id).map((q) => q.model);
     expect(models).toEqual(["z-ai/glm-5.3-flash", "exa-search"]);
-    expect(w.reported_cost_usd).toBeCloseTo(0.00003, 12);
+    expect(w.reported_cost_usd).toBeCloseTo(0.00026105, 12);
+    // The report's cross-check compares model costs only: the search fee is not part of OpenRouter's charge.
+    expect(renderReport(r.db, r.runId, T0 + 60_000)).toMatch(/Cross-check on 3 wake\(s\).*\(0\.0% difference\)/);
   });
 
   test("webfetch off: no block, and only relay-search agents get a token", async () => {
