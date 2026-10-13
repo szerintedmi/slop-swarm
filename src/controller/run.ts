@@ -98,14 +98,18 @@ export function humanDuration(ms: number): string {
  * goes into the wake note (wakeNote), so the system prompt stays the same from wake to wake (a continued session
  * keeps its prompt cache). A seed without it gets no summary.
  */
-export function fillSeed(seed: string, v: { name: string; forgeUrl: string; maxSleepMs: number; github?: { org: string; user: string } }): string {
+export function fillSeed(seed: string, v: { name: string; forgeUrl: string; pagesUrl?: string; maxSleepMs: number; github?: { org: string; user: string } }): string {
   return seed
     .replace(/^\{github\}\n/m, v.github ? githubLine(v.github) : "")
     .replaceAll("{name}", v.name)
     .replaceAll("{forge_url}", v.forgeUrl)
+    .replaceAll("{pages_url}", v.pagesUrl ?? PAGES_FALLBACK)
     .replaceAll("{max_sleep}", humanDuration(v.maxSleepMs))
     .replaceAll(ACTIVITY_PLACEHOLDER, ACTIVITY_DESCRIPTION);
 }
+
+/** {pages_url} when nothing serves pages (`just smoke`, preflight): the path shape still reads right. */
+const PAGES_FALLBACK = "the world's pages site, ";
 
 export const ACTIVITY_PLACEHOLDER = "{activity}";
 const ACTIVITY_DESCRIPTION = "what the others did on the forge since your last wake";

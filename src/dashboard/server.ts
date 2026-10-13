@@ -9,6 +9,7 @@ import type { AgentHost } from '../host/agent-host.ts';
 import { buildDashboard } from './build.ts';
 import { createDashboardService } from './service.ts';
 import { createApi, type ApiService } from '../api.ts';
+import type { PublishedRepo } from '../pages.ts';
 export { fileTree, overviewState } from './data.ts';
 
 export interface DashboardOptions {
@@ -21,6 +22,9 @@ export interface DashboardOptions {
   forge?: { runId: string; url: string };
   /** The owner's view of a world's forge, when the service runs it. */
   forgeFor?: (world: string) => string | null;
+  /** A world's pages origin (src/pages.ts) while its forge is up, and its published repos. */
+  pagesFor?: (world: string) => string | null;
+  pagesOf?: (world: string) => Promise<{ url: string | null; repos: PublishedRepo[] }>;
   /**
    * Host names this server answers to (besides localhost and its bind address): a request for any other Host is
    * refused, so a page that rebinds its own name to this address (DNS rebinding) can't use the API.

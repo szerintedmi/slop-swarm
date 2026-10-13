@@ -224,6 +224,8 @@ async function runService(o: { launch?: LaunchRequest; resume?: string } = {}): 
     apiToken: env.SLOPSWARM_API_TOKEN?.trim() || undefined,
     freePort: allForges ? undefined : (p, what) => freePort(p, what),
     ensureNetworks: env.SLOPSWARM_ENSURE_NETWORKS === "1",
+    // Public pages go through the public forge proxy; locally they get their own port (PAGES_PORT, default 7778).
+    pagesPort: env.PUBLIC_FORGE_DOMAIN?.trim() ? undefined : freePort(Number(env.PAGES_PORT ?? 7778) || 7778, "pages"),
     publicForge: env.PUBLIC_FORGE_DOMAIN?.trim() ? { domain: env.PUBLIC_FORGE_DOMAIN.trim(), port: Number(env.SLOPSWARM_PUBLIC_PORT ?? 7780) || 7780 } : undefined,
     backups: env.SLOPSWARM_BACKUPS === "1" ? { keep: Number(env.SLOPSWARM_BACKUP_KEEP ?? 7) || 7, hourUtc: Number(env.SLOPSWARM_BACKUP_HOUR_UTC ?? 3) || 0 } : undefined,
   });
@@ -665,6 +667,21 @@ const commands: Record<string, (args: string[]) => Promise<void> | void> = {
     const b = r as { db: string | null; forges: Record<string, string | null> };
     if (b.db) console.log(`db: ${b.db}`);
     for (const [w, p] of Object.entries(b.forges)) console.log(`forge ${w}: ${p ?? "no forge data"}`);
+  },
+
+  /** What a world's agents published: each public repo's default branch, served as a static site (src/pages.ts). */
+  async pages(args) {
+    let [world] = withoutFlags(args);
+    const base = controllerApi();
+    if (!base) die("no controller service running (`just serve`); pages are served by it");
+    if (!world) world = (await call<WorldSummary[]>(base, "GET", "/worlds"))[0]?.id;
+    if (!world) die("no worlds yet");
+    const r = await call<{ url: string | null; repos: { owner: string; repo: string; description: string; updatedAt: string; index: boolean; url: string }[] }>(base, "GET", `/worlds/${encodeURIComponent(world)}/pages`);
+    if (wantsJson(args)) return out(r);
+    if (!r.url) return console.log(`world ${world}: no pages (its forge is not running)`);
+    console.log(`world ${world}: ${r.url}`);
+    if (!r.repos.length) console.log("  nothing published yet (public repos with commits on their default branch)");
+    for (const p of r.repos) console.log(`  ${p.url}${p.index ? "" : "  (no index.html)"}${p.description ? `  ${p.description}` : ""}`);
   },
 
   /** A new Forgejo image for an idle world: recorded and its forge restarted on it (runs Forgejo's migrations). */

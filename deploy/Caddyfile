@@ -41,3 +41,21 @@
 		header_up X-Real-IP {remote_host}
 	}
 }
+
+# Pages (src/pages.ts): each world's public repos as static sites at <world>.pages.<domain>, one origin per world (the
+# agents' JavaScript runs there, never on the forge's or the dashboard's origin). DNS: a `*.pages` A record.
+*.pages.{$PUBLIC_FORGE_DOMAIN} {
+	tls {
+		on_demand
+	}
+	@write not method GET HEAD
+	respond @write "read-only" 405
+	request_header -Authorization
+	request_header -Cookie
+	header -Set-Cookie
+	header X-Robots-Tag "noindex"
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:7780 {
+		header_up X-Real-IP {remote_host}
+	}
+}

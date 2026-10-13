@@ -1,10 +1,14 @@
 #!/usr/bin/env node
-// browsercheck: open a local page in headless Chromium the way a person would open it (file://), run a few steps,
-// and report what happened: uncaught errors, console output, failed requests, screenshots. For agents testing the
-// browser software they build. Local files only: no network beyond what the page itself requests (which goes
-// through the container's normal egress, so most outside requests fail and are reported).
-import { existsSync, mkdirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+// browsercheck: open a local page in headless Chromium the way it is published (src/pages.ts: a repo's files served
+// over HTTP under /<owner>/<repo>/), run a few steps, and report what happened: uncaught errors, console output,
+// failed requests, screenshots. For agents testing the browser software they build. The folder is served on
+// 127.0.0.1 under a sub-path, so ES modules, fetch() of its own files and workers work, and root-absolute URLs
+// (`/app.js`) fail here as they would when published. `--file` opens it as file:// instead. No network beyond what
+// the page itself requests (which goes through the container's normal egress, so most outside requests fail and are
+// reported).
+import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
+import { createServer } from "node:http";
+import { basename, dirname, extname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 
@@ -12,7 +16,8 @@ import puppeteer from "puppeteer-core";
 const LIMIT_S = Number(process.env.BROWSERCHECK_TIMEOUT_S) > 0 ? Number(process.env.BROWSERCHECK_TIMEOUT_S) : 120;
 
 const USAGE = `usage: browsercheck PATH [steps…]
-  PATH              an .html file, or a directory with an index.html; opened as file://
+  PATH              an .html file, or a directory with an index.html. Its folder is served over HTTP at
+                    http://127.0.0.1:PORT/site/repo/ (published pages live under /<owner>/<repo>/: use relative URLs)
 steps, run in order after the page loads (default: --wait 2000 --shot /tmp/browsercheck.png):
   --wait MS         let the page run
   --click X,Y       click at viewport pixel X,Y
@@ -24,6 +29,7 @@ steps, run in order after the page loads (default: --wait 2000 --shot /tmp/brows
   --shot FILE       save a screenshot (PNG); view it with your image/file reading tool
 options:
   --size WxH        viewport (default 1280x800)
+  --file            open it as file:// instead of over HTTP
   --timeout S       give up sooner than this world's limit of ${LIMIT_S}s (the limit can't be raised)
 The whole run (start, load, every step) stops at the limit. There is no GPU and one CPU: WebGL runs in software, so
 heavy shaders are slow here even when they are fine on a real machine.
@@ -39,6 +45,7 @@ if (!args.length || args[0] === "-h" || args[0] === "--help") die(USAGE);
 let target = null;
 let size = [1280, 800];
 let timeoutS = LIMIT_S;
+let asFile = false;
 const steps = [];
 const pair = (v, n, flag) => {
   const xs = String(v ?? "").split(",").map(Number);
@@ -57,6 +64,7 @@ for (let i = 0; i < args.length; i++) {
     if (!(timeoutS > 0)) die("--timeout: expected seconds");
     if (timeoutS > LIMIT_S) die(`--timeout: at most ${LIMIT_S}s in this world (the operator's limit)`);
   }
+  else if (a === "--file") asFile = true;
   else if (a === "--wait") steps.push(["wait", Number(val())]);
   else if (a === "--click") steps.push(["click", pair(val(), 2, a)]);
   else if (a === "--move") steps.push(["move", pair(val(), 2, a)]);
@@ -74,6 +82,48 @@ let file = resolve(target);
 if (existsSync(file) && statSync(file).isDirectory()) file = join(file, "index.html");
 if (!existsSync(file)) die(`not found: ${file}`);
 if (!steps.length) steps.push(["wait", 2000], ["shot", "/tmp/browsercheck.png"]);
+
+const TYPES = {
+  ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8", ".json": "application/json",
+  ".map": "application/json", ".webmanifest": "application/manifest+json", ".txt": "text/plain; charset=utf-8",
+  ".md": "text/plain; charset=utf-8", ".csv": "text/csv; charset=utf-8", ".xml": "application/xml", ".svg": "image/svg+xml",
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+  ".avif": "image/avif", ".ico": "image/x-icon", ".wasm": "application/wasm", ".mp3": "audio/mpeg", ".ogg": "audio/ogg",
+  ".wav": "audio/wav", ".mp4": "video/mp4", ".webm": "video/webm", ".woff": "font/woff", ".woff2": "font/woff2",
+  ".ttf": "font/ttf", ".otf": "font/otf", ".glb": "model/gltf-binary", ".gltf": "model/gltf+json",
+};
+const PREFIX = "/site/repo/";
+
+/** Serve `root` under PREFIX the way pages do (dir/ → dir/index.html, dir → dir/); resolves to the page's URL. */
+function serve(root, page) {
+  const server = createServer((req, res) => {
+    const u = new URL(req.url, "http://x");
+    // Chromium asks for it on its own; a published page's site root isn't the agent's either.
+    if (u.pathname === "/favicon.ico") return res.writeHead(204).end();
+    if (!u.pathname.startsWith(PREFIX)) return res.writeHead(404).end("not found (outside the site: use relative URLs)");
+    let path;
+    try {
+      path = resolve(root, decodeURIComponent(u.pathname.slice(PREFIX.length)));
+    } catch {
+      return res.writeHead(400).end();
+    }
+    if (path !== root && !path.startsWith(root + sep)) return res.writeHead(404).end();
+    if (existsSync(path) && statSync(path).isDirectory()) {
+      if (!u.pathname.endsWith("/")) return res.writeHead(301, { location: `${u.pathname}/${u.search}` }).end();
+      path = join(path, "index.html");
+    }
+    if (!existsSync(path) || !statSync(path).isFile()) return res.writeHead(404).end("not found");
+    res.writeHead(200, { "content-type": TYPES[extname(path).toLowerCase()] ?? "application/octet-stream", "cache-control": "no-store" });
+    createReadStream(path).pipe(res);
+  });
+  return new Promise((ok) =>
+    server.listen(0, "127.0.0.1", () => {
+      server.unref();
+      ok(`http://127.0.0.1:${server.address().port}${PREFIX}${relative(root, join(root, page)).split(sep).map(encodeURIComponent).join("/")}`);
+    }),
+  );
+}
 
 const t0 = Date.now();
 const stamp = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
@@ -150,7 +200,7 @@ try {
       log("HTTP", `${r.status()} ${r.url()}`);
     }
   });
-  const url = pathToFileURL(file).href;
+  const url = asFile ? pathToFileURL(file).href : await serve(dirname(file), basename(file));
   doing = `loading ${url}`;
   log("open", url);
   // The watchdog has the time limit; puppeteer's own navigation timeout would fire first with a vaguer message.

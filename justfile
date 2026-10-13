@@ -36,6 +36,10 @@ backup *worlds:
 forge-upgrade world image:
     {{cli}} forge-upgrade {{world}} {{image}}
 
+# what a world's agents published (default: the newest world): each public repo's default branch as a static site (--json)
+pages *args:
+    {{cli}} pages {{args}}
+
 # list worlds: runs, agents, home generations (--json)
 worlds *args:
     {{cli}} worlds {{args}}

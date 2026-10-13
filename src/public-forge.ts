@@ -2,12 +2,14 @@
 // (deploy/Caddyfile) terminates TLS on the VPS's public port 443 and forwards everything here, on localhost:
 //   - `<world>.<PUBLIC_FORGE_DOMAIN>` → that world's forge (its 127.0.0.1 port), read-only;
 //   - the apex → an index of the worlds;
+//   - `<world>.pages.<PUBLIC_FORGE_DOMAIN>` → that world's pages (src/pages.ts);
 //   - GET /ask?domain=… → whether Caddy may get a certificate for that name (on-demand TLS).
 // The rules Caddy applies are applied here again: GET/HEAD only (plus POST to git-upload-pack, which anonymous clone
 // needs), no /user/* but avatars, no /admin*, no admin API, no archives; Authorization and Cookie stripped both ways.
 // Per client IP rate limits (X-Real-IP from Caddy).
 import type { Database } from "bun:sqlite";
 import { publicForgeLabel } from "./forge.ts";
+import { createPages, pagesOrigin } from "./pages.ts";
 
 export interface PublicForgeOptions {
   db: Database;
@@ -43,8 +45,15 @@ const DROP_REQUEST = ["authorization", "cookie", "x-forwarded-for", "x-real-ip",
 const html = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex", "cache-control": "public, max-age=60" } });
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
+/** The world a subdomain label names (not archived), or null. */
+export function worldByLabel(db: Database, label: string): string | null {
+  if (!label || label.includes(".")) return null;
+  for (const w of db.query<{ id: string }, []>("SELECT id FROM worlds WHERE status != 'archived'").all()) if (publicForgeLabel(w.id) === label) return w.id;
+  return null;
+}
+
 /** A fixed-window counter per client and kind. */
-class Limiter {
+export class Limiter {
   private windows = new Map<string, { start: number; n: number }>();
   constructor(private readonly now: () => number) {}
   allow(key: string, perMinute: number): boolean {
@@ -71,14 +80,17 @@ export function createPublicForge(o: PublicForgeOptions): (req: Request, peer?: 
   const worldFor = (host: string): { id: string; port: number } | null => {
     const h = host.toLowerCase().replace(/:\d+$/, "");
     if (!h.endsWith(`.${domain}`)) return null;
-    const label = h.slice(0, -domain.length - 1);
-    if (!label || label.includes(".")) return null;
-    for (const w of o.db.query<{ id: string }, []>("SELECT id FROM worlds WHERE status != 'archived'").all()) {
-      if (publicForgeLabel(w.id) !== label) continue;
-      const port = o.forgePort(w.id);
-      return port ? { id: w.id, port } : null;
-    }
-    return null;
+    const id = worldByLabel(o.db, h.slice(0, -domain.length - 1));
+    const port = id ? o.forgePort(id) : null;
+    return id && port ? { id, port } : null;
+  };
+  const pagesSuffix = `pages.${domain}`;
+  const isPages = (host: string) => host.toLowerCase().replace(/:\d+$/, "").endsWith(`.${pagesSuffix}`);
+  const pages = createPages({ db: o.db, suffix: pagesSuffix, forgePort: o.forgePort, origin: (w) => pagesOrigin(w, { publicDomain: domain })!, now, fetch: o.fetch });
+  const pagesWorld = (host: string) => {
+    const h = host.toLowerCase().replace(/:\d+$/, "");
+    const id = worldByLabel(o.db, h.slice(0, -pagesSuffix.length - 1));
+    return id && o.forgePort(id) ? id : null;
   };
 
   const index = () => {
@@ -100,8 +112,9 @@ export function createPublicForge(o: PublicForgeOptions): (req: Request, peer?: 
     // Caddy's on-demand TLS check: only the apex and worlds' names get certificates.
     if (url.pathname === "/ask") {
       const d = (url.searchParams.get("domain") ?? "").toLowerCase();
-      return new Response(null, { status: d === domain || worldFor(d) ? 200 : 404 });
+      return new Response(null, { status: d === domain || (isPages(d) ? pagesWorld(d) : worldFor(d)) ? 200 : 404 });
     }
+    if (isPages(host)) return pages(req, peer);
     // Caddy is the only client (localhost); it passes the visitor's address.
     const client = peer === "127.0.0.1" || peer === "::1" ? (req.headers.get("x-real-ip") ?? peer) : peer;
     const rule = publicRule(req.method, url.pathname);

@@ -20,6 +20,7 @@
 //   GET    /api/v1/logs[?since=ms&limit=]           controller + runner structured logs
 //   GET    /api/v1/worlds                           worlds with runs and agents
 //   GET    /api/v1/worlds/:id                       one world
+//   GET    /api/v1/worlds/:id/pages[?owner=]        {url, repos}: its published repos (src/pages.ts); the forge must be up
 //   GET    /api/v1/worlds/:id/agents/:name/home     home tree (live, or the VPS copy)
 //   GET    /api/v1/worlds/:id/agents/:name/file?path=  one home file
 //   GET    /api/v1/presets | agents                 config rows
@@ -75,6 +76,7 @@ export interface ApiService {
   resumeRun?(id: string): Promise<void>;
   backupNow?(o: { db?: boolean; worlds?: string[] }): Promise<unknown>;
   upgradeForge?(world: string, image: string): Promise<void>;
+  pages?(world: string, owner?: string): Promise<{ url: string | null; repos: unknown[] }>;
 }
 
 export interface ApiOptions {
@@ -273,6 +275,11 @@ export function createApi(o: ApiOptions): (req: Request) => Promise<Response | n
       const w = listWorlds(db).find((x) => x.id === p[1]);
       if (!w) throw new ApiError(404, "world not found");
       return json({ ...w, runs: db.query<RunRow, [string]>("SELECT * FROM runs WHERE COALESCE(world_id, id) = ? ORDER BY started_at DESC").all(w.id).map(publicRun) });
+    }
+    if (is("GET", "worlds", null, "pages")) {
+      if (!getWorld(db, p[1]!)) throw new ApiError(404, "world not found");
+      if (!o.service?.pages) throw new ApiError(501, "this controller doesn't serve pages");
+      return json(await o.service.pages(p[1]!, url.searchParams.get("owner") ?? undefined));
     }
     if (is("GET", "worlds", null, "agents", null, "home") || is("GET", "worlds", null, "agents", null, "file")) {
       const world = p[1]!;
