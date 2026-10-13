@@ -15,6 +15,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 CONF=/etc/slopswarm/deploy.conf
 ENV_FILE=/etc/slopswarm/slopswarm.env
 LISTEN_CONF=/etc/ssh/sshd_config.d/20-slopswarm-listen.conf
+SSH_DROPIN=/etc/systemd/system/ssh.service.d/10-slopswarm-tailnet.conf
 
 log() { printf '\n==> %s\n' "$*"; }
 warn() { printf 'WARNING: %s\n' "$*" >&2; }
@@ -38,9 +39,20 @@ lock_ssh() {
   [[ $(ts_state) == Running ]] || die "tailscale isn't running"
   local ip; ip=$(ts_ip4); [[ -n $ip ]] || die "no tailnet IPv4 address"
   if systemctl is-active --quiet ssh.socket; then die "ssh.socket is active: ListenAddress would be ignored"; fi
-  # At boot sshd may start before tailscale0 has its address; nonlocal bind lets it listen on it anyway.
+  # At boot sshd must not come up before tailscale0 has its address, or it silently listens on loopback only:
+  # start it after tailscaled, wait for the address (sshd still starts without it), and allow a nonlocal bind.
   echo 'net.ipv4.ip_nonlocal_bind = 1' >/etc/sysctl.d/90-slopswarm-ssh.conf
   sysctl -q -p /etc/sysctl.d/90-slopswarm-ssh.conf
+  install -d -m 0755 "$(dirname "$SSH_DROPIN")"
+  cat >"$SSH_DROPIN" <<EOT
+# slop-swarm lock-ssh: sshd listens on the tailnet address, so it needs tailscale0 up first. Undo: bootstrap.sh unlock-ssh
+[Unit]
+After=tailscaled.service
+Wants=tailscaled.service
+[Service]
+ExecStartPre=-/usr/bin/timeout 60 /bin/sh -c 'until ip -4 addr show tailscale0 2>/dev/null | grep -q "inet $ip/"; do sleep 1; done'
+EOT
+  systemctl daemon-reload
   printf '# Only loopback and the tailnet reach sshd. Undo: bootstrap.sh unlock-ssh\nListenAddress 127.0.0.1\nListenAddress ::1\nListenAddress %s\n' "$ip" >"$LISTEN_CONF"
   sshd -t
   systemctl restart ssh
@@ -51,7 +63,8 @@ lock_ssh() {
 }
 
 unlock_ssh() {
-  rm -f "$LISTEN_CONF"
+  rm -f "$LISTEN_CONF" "$SSH_DROPIN" /etc/sysctl.d/90-slopswarm-ssh.conf
+  systemctl daemon-reload
   sshd -t
   systemctl restart ssh
   log "sshd listens on all addresses again"
