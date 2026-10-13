@@ -142,6 +142,24 @@ describe("dashboard", () => {
     expect(await (await fetch(`${ro.url}/`)).text()).not.toContain("Forge ↗"); // no forge served alongside
   });
 
+  test("the forge link follows the browser's host: loopback locally, the dashboard's own host over the tailnet", async () => {
+    const { forgeLink } = await import("../src/dashboard/service.ts");
+    expect(forgeLink(new URL("http://localhost:7777/"), "http://127.0.0.1:3301")).toBe("http://127.0.0.1:3301");
+    expect(forgeLink(new URL("http://100.81.242.93:7777/worlds"), "http://127.0.0.1:3301")).toBe("http://100.81.242.93:3301");
+    expect(forgeLink(new URL("http://slopswarm-vps.example.ts.net:7777/"), "http://127.0.0.1:3301")).toBe("http://slopswarm-vps.example.ts.net:3301");
+    expect(forgeLink(new URL("http://100.81.242.93:7777/"), "https://world.forge.example")).toBe("https://world.forge.example"); // a public URL stays
+    expect(forgeLink(new URL("http://100.81.242.93:7777/"), null)).toBeNull();
+    // Through the server: the Host header the browser sent decides.
+    const viaHost = await startDashboard({ db, port: 0, parserFor: stubParser, forge: { runId: RUN, url: "http://127.0.0.1:3300" }, allowedHosts: ["100.64.0.5"] });
+    try {
+      const local = await (await fetch(`${viaHost.url}/`)).text();
+      expect(local).toContain('href="http://127.0.0.1:3300"');
+      const remote = await (await fetch(`${viaHost.url}/`, { headers: { host: "100.64.0.5:7777" } })).text();
+      expect(remote).toContain('href="http://100.64.0.5:3300"');
+      expect(remote).not.toContain("127.0.0.1:3300");
+    } finally { viaHost.stop(); }
+  });
+
   test("serves compiled client assets and SvelteKit data refreshes", async () => {
     const html = await (await fetch(`${dash.url}/`)).text();
     expect(html).not.toContain("config_yaml");

@@ -7,10 +7,15 @@
   let { data, children }: LayoutProps = $props();
   const q = $derived(data.runId ? `?run=${encodeURIComponent(data.runId)}` : '');
   const live = $derived('model' in page.data && page.data.model && 'live' in page.data.model ? page.data.model.live : false);
+  // Live pages refresh every 5 s; idle ones every 20 s, so a page opened before a launch notices the run. Paused while the
+  // tab is hidden, a held disclosure (the raw log) is open, or text is selected.
   onMount(() => {
     let refreshing = false;
+    let tick = 0;
     const timer = setInterval(async () => {
-      if (!live || refreshing || document.hidden || document.querySelector('details[data-hold][open]') || String(window.getSelection()).length) return;
+      tick++;
+      if (!live && tick % 4 !== 0) return;
+      if (refreshing || document.hidden || document.querySelector('details[data-hold][open]') || String(window.getSelection()).length) return;
       refreshing = true;
       try { await invalidateAll(); } catch { /* retry on the next tick */ } finally { refreshing = false; }
     }, 5000);

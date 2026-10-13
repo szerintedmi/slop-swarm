@@ -37,6 +37,23 @@ async function defaultParser(harness: Harness): Promise<StreamParser> {
   return getAdapter(harness).newParser();
 }
 
+/**
+ * The forge link for the browser. The controller reaches a world's forge on its own loopback (`http://127.0.0.1:<port>`);
+ * a browser elsewhere (the VPS's dashboard over the tailnet) gets the dashboard's own host with the forge's port, where
+ * the forwarder also publishes it (SLOPSWARM_FORGE_PUBLISH).
+ */
+export function forgeLink(req: URL, local: string | null | undefined): string | null {
+  if (!local) return null;
+  const loopback = new Set(['localhost', '127.0.0.1', '[::1]']);
+  if (loopback.has(req.hostname) || !req.hostname) return local;
+  try {
+    const u = new URL(local);
+    if (!loopback.has(u.hostname)) return local;
+    u.hostname = req.hostname;
+    return u.toString().replace(/\/$/, '');
+  } catch { return local; }
+}
+
 export function createDashboardService(opts: DashboardOptions) {
   const { db } = opts;
   const readonly = !!opts.readonly;
@@ -54,7 +71,7 @@ export function createDashboardService(opts: DashboardOptions) {
       runs: db.query<{ id: string; status: string }, []>('SELECT id, status FROM runs ORDER BY started_at DESC LIMIT 100').all(),
       readonly,
       live: !!run && runLive(run),
-      forgeUrl: run ? (opts.forgeFor?.(worldOf(run)) ?? (opts.forge?.runId === run.id ? opts.forge.url : null)) : null,
+      forgeUrl: run ? forgeLink(url, opts.forgeFor?.(worldOf(run)) ?? (opts.forge?.runId === run.id ? opts.forge.url : null)) : null,
       // Under 10% free on the data dir's disk: the header warns.
       diskLow: (() => { const d = diskUse(); return d && d.freeRatio < 0.1 ? { freeBytes: d.freeBytes, freeRatio: d.freeRatio } : null; })(),
     };
@@ -109,7 +126,7 @@ export function createDashboardService(opts: DashboardOptions) {
     }
     // Pages that aren't about one run: worlds, a world and its homes, config.
     if (path === '/worlds') {
-      const worlds = listWorlds(db).map(w => ({ ...w, forgeUrl: opts.forgeFor?.(w.id) ?? null }));
+      const worlds = listWorlds(db).map(w => ({ ...w, forgeUrl: forgeLink(url, opts.forgeFor?.(w.id)) }));
       return { kind: 'worlds' as const, worlds, presets: listPresets(db).map(p => p.name), readonly: !canWrite, live: false };
     }
     const wm2 = /^\/world\/([^/]+)$/.exec(path);
@@ -128,7 +145,7 @@ export function createDashboardService(opts: DashboardOptions) {
         const file = selected ? (await homeFile(t.source.live ? opts.host : undefined, id, agent, selected)).file : null;
         home = { agent, tree, fileCount: countFiles(tree), selected, file, source: t.source };
       }
-      return { kind: 'world' as const, world: { ...world, forgeUrl: opts.forgeFor?.(id) ?? null }, runs, home, presets: listPresets(db).map(p => p.name), readonly: !canWrite, live: !!world.activeRun };
+      return { kind: 'world' as const, world: { ...world, forgeUrl: forgeLink(url, opts.forgeFor?.(id)) }, runs, home, presets: listPresets(db).map(p => p.name), readonly: !canWrite, live: !!world.activeRun };
     }
     if (path === '/config') {
       const t = url.searchParams.get('tab');
