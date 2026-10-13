@@ -14,16 +14,30 @@
   const seedNames = $derived([...new Set(model.seeds.map(s => s.name))]);
   let error = $state('');
   let saved = $state('');
-  $effect(() => { name = editing?.name ?? ''; yaml = editing?.yaml ?? ''; error = ''; saved = ''; });
+  // The forms load when a different row is picked, not on every refresh (the layout's invalidateAll swaps in new row
+  // objects every 20 s, which used to wipe what was being typed, and any save error with it).
+  let shown = '';
+  $effect(() => {
+    const key = `${model.tab}\n${model.edit}`;
+    if (key === shown) return;
+    shown = key;
+    name = editing?.name ?? ''; yaml = editing?.yaml ?? ''; error = ''; saved = '';
+  });
   // A new seed starts from the text of the one shown, so a variant doesn't begin from an empty page.
-  $effect(() => { seedText = model.seed?.text ?? ''; seedName = model.newSeed ? '' : (model.seed?.name ?? ''); });
+  let shownSeed = '';
+  $effect(() => {
+    const key = `${model.newSeed}\n${model.seed?.id}`;
+    if (key === shownSeed) return;
+    shownSeed = key;
+    seedText = model.seed?.text ?? ''; seedName = model.newSeed ? '' : (model.seed?.name ?? '');
+  });
   async function save(event: SubmitEvent) {
     event.preventDefault();
     error = ''; saved = '';
     try {
       await apiSend('PUT', `/${kind}/${encodeURIComponent(name.trim())}`, { yaml });
-      saved = 'saved';
       await goto(`/config?tab=${model.tab}&edit=${encodeURIComponent(name.trim())}`, { invalidateAll: true });
+      saved = 'saved';
     } catch (e) { error = (e as Error).message; }
   }
   async function remove() {
