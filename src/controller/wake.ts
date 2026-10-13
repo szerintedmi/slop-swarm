@@ -22,7 +22,8 @@ import type { AgentEvent, CostBreakdown, RequestUsage, Harness, HarnessAdapter, 
 import { isDepleted, overLimit, wakeLimit, agentRemaining } from "./budget.ts";
 import { mirrorFile, mirrorSessionFiles } from "./host-files.ts";
 import type { Repo } from "./repo.ts";
-import { fillSeed, wakeNote, SYSTEM_PROMPT_FILE } from "./run.ts";
+import { fillSeed, seedWantsActivity, wakeNote, SYSTEM_PROMPT_FILE } from "./run.ts";
+import { activityLines } from "./activity.ts";
 import { messagePull, parseNextWake, planNextWake } from "./scheduler.ts";
 import { selfFiles } from "./self-writer.ts";
 
@@ -48,6 +49,8 @@ export interface WakeDeps {
   pricingYaml: string;
   seed: string;
   runDeadline: number;
+  /** When the run started: the forge activity summary of an agent's first wake in the world counts from it. */
+  runStartedAt: number;
   /** The effective swarm budget (config plus extensions). */
   swarmBudgetUsd: number;
   /** Agent image reference, as the runner knows it. */
@@ -64,7 +67,7 @@ export interface WakeDeps {
   githubToken?: () => string | undefined;
   /** Where container secrets come from (default: the controller's env). */
   env?: Record<string, string | undefined>;
-  /** The run's forge: unread notification counts (plan §4.5). */
+  /** The run's forge: unread notification counts (plan §4.5), the others' activity for the wake note. */
   forge: ForgeApi;
   /** An agent's forge token (default: the one stored in the world, forge.ts). */
   forgeToken?: (agent: string) => string | undefined;
@@ -237,7 +240,8 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     // Before the wake is started there is nothing to kill; abortReason keeps it from starting.
     if (started) sendKill();
   };
-  let stop = wakeStopAt(startedAt, cfg.budgets.perWake.timeoutMs, deps.runDeadline, cfg.run.worldEndGraceMs);
+  let worldEnd = deps.runDeadline;
+  let stop = wakeStopAt(startedAt, cfg.budgets.perWake.timeoutMs, worldEnd, cfg.run.worldEndGraceMs);
   let armed = false;
   const arm = () => {
     clearTimeout(timeout);
@@ -249,8 +253,27 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     clearTimeout(timeout);
   };
   const setWorldEnd = (deadline: number) => {
+    worldEnd = deadline;
     stop = wakeStopAt(startedAt, cfg.budgets.perWake.timeoutMs, deadline, cfg.run.worldEndGraceMs);
     if (armed && !abortReason) arm();
+  };
+
+  /**
+   * The others' forge activity since this agent's last wake in the world (else the run start), for the wake note;
+   * undefined when the seed doesn't ask for it or the forge can't tell (an error is logged, the wake goes on).
+   */
+  const othersActivity = async () => {
+    if (!seedWantsActivity(deps.seed) || !deps.forge.activity) return undefined;
+    const last = sessionHistory.at(-1)?.started_at;
+    const since = last ?? deps.runStartedAt;
+    try {
+      const others = cfg.agents.map((c) => c.name).filter((n) => n !== a.name);
+      const feeds = await Promise.all(others.map((n) => deps.forge.activity!(n, since)));
+      return { lines: activityLines(Object.fromEntries(others.map((n, i) => [n, feeds[i]!]))), since: last !== undefined ? ("last_wake" as const) : ("run_start" as const) };
+    } catch (err) {
+      repo.event({ agent: a.name, wake_id: wakeId, kind: "error", name: "forge_activity", detail: short(String(err)), ok: 0 });
+      return undefined;
+    }
   };
 
   /** Unread forge notifications (only those updated after `since`, if given). A forge error counts as none. */
@@ -331,6 +354,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     const secrets = secretValues(agentCfg ?? { harness: a.harness, provider: "native" }, env);
     await host.prepare(world, a.name, { files, remove, env: secrets, relayToken });
 
+    const finishedCost = previous.reduce((t, w) => t + w.cost_usd, 0);
     const argv = adapter.buildCommand({
       prompt: wakeNote({
         now: startedAt,
@@ -341,6 +365,9 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
         budgetUsd: a.budget_usd,
         spentUsd: a.spent_usd,
         wakeLimitUsd: o.limitUsd,
+        avgWakeUsd: previous.length ? finishedCost / previous.length : undefined,
+        worldEndsAt: worldEnd,
+        activity: await othersActivity(),
         maxTurns: cfg.budgets.perWake.maxTurns,
         stopsAt: stop.at,
         brief: seq === 1 ? (deps.brief ?? undefined) : undefined,

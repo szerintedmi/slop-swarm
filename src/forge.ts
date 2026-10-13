@@ -148,10 +148,29 @@ export function forgePort(configured: number, env = process.env): number {
   return p;
 }
 
+/** One entry of a user's activity feed, as the wake note's summary needs it (src/controller/activity.ts). */
+export interface ForgeActivity {
+  /** Forgejo's op_type: create_repo, commit_repo, create_pull_request, merge_pull_request, create_issue, … */
+  op: string;
+  /** unix ms */
+  at: number;
+  /** owner/name of the repo it happened in */
+  repo: string;
+  /** create_repo of a fork: the parent's owner/name */
+  forkOf?: string;
+  /** commit_repo: commits pushed */
+  commits?: number;
+  /** issues and pull requests: their number and title */
+  index?: string;
+  title?: string;
+}
+
 /** What the controller needs from the forge; faked in tests. */
 export interface ForgeApi {
   /** Unread notifications of `user`; with `since` (unix ms), only those updated after it. */
   unread(user: string, since?: number): Promise<number>;
+  /** What `user` did after `since` (unix ms), newest first (at most the feed's last 50 entries). */
+  activity?(user: string, since: number): Promise<ForgeActivity[]>;
 }
 
 type Auth = { basic: [string, string] } | { token: string };
@@ -236,6 +255,33 @@ export class ForgeClient implements ForgeApi {
     const list = await this.must("GET", `/notifications?${q}`, { sudo: user });
     return Array.isArray(list) ? list.length : 0;
   }
+
+  async activity(user: string, since: number): Promise<ForgeActivity[]> {
+    const feed = await this.must("GET", `/users/${encodeURIComponent(user)}/activities/feeds?only-performed-by=true&limit=50`);
+    return Array.isArray(feed) ? feed.map(parseActivity).filter((a): a is ForgeActivity => a !== null && a.at > since) : [];
+  }
+}
+
+/** A feed entry (Forgejo's Activity) as a ForgeActivity; null if it can't be read. */
+export function parseActivity(e: any): ForgeActivity | null {
+  const at = Date.parse(e?.created ?? "");
+  const repo = e?.repo?.full_name;
+  if (typeof e?.op_type !== "string" || !Number.isFinite(at) || typeof repo !== "string") return null;
+  const a: ForgeActivity = { op: e.op_type, at, repo };
+  if (e.op_type === "create_repo" && e.repo.fork && typeof e.repo.parent?.full_name === "string") a.forkOf = e.repo.parent.full_name;
+  // commit_repo: {"Commits": [...], "Len": N, ...}; issues and pull requests: ["<index>", "<title>"].
+  let content: any;
+  try {
+    content = e.content ? JSON.parse(e.content) : undefined;
+  } catch {
+    content = undefined;
+  }
+  if (e.op_type === "commit_repo") a.commits = typeof content?.Len === "number" ? content.Len : 0;
+  else if (Array.isArray(content) && typeof content[0] === "string") {
+    a.index = content[0];
+    if (typeof content[1] === "string") a.title = content[1];
+  }
+  return a;
 }
 
 /** An agent's stored forge token in its world (controller side, 0600), if any. */

@@ -69,8 +69,9 @@ export function createRun(
       const prev = known.get(a.name);
       // A session only carries over on the same harness (a Codex thread id means nothing to Claude Code).
       const carry = prev && prev.harness === a.harness ? prev : undefined;
-      // Everyone is due at once; max_concurrent_wakes spreads them out.
-      ins.run(id, a.name, a.harness, a.model, a.effort, a.budgetUsd, now, carry?.last_session_id ?? null, carry?.continue_next ?? 0);
+      // First wakes `first_wake_stagger` apart in config order, so the later ones find something on the forge
+      // (all at once, they built four unrelated things in parallel); max_concurrent_wakes also spreads them out.
+      ins.run(id, a.name, a.harness, a.model, a.effort, a.budgetUsd, now + cfg.agents.indexOf(a) * cfg.scheduler.firstWakeStaggerMs, carry?.last_session_id ?? null, carry?.continue_next ?? 0);
       if (prev) db.query("UPDATE world_agents SET harness = ?, removed_at = NULL WHERE world_id = ? AND name = ?").run(a.harness, world, a.name);
       else db.query("INSERT INTO world_agents (world_id, name, harness, added_at) VALUES (?, ?, ?, ?)").run(world, a.name, a.harness, now);
     }
@@ -93,15 +94,24 @@ export function humanDuration(ms: number): string {
 
 /**
  * Fill the seed's {placeholders}. The template (not the filled text) is what runs.seed_sha256 freezes.
- * Agents are not told when the world ends (plan §4.3): that is the harness's business.
+ * `{activity}` marks where the wake note's summary of the others' forge activity is described; the summary itself
+ * goes into the wake note (wakeNote), so the system prompt stays the same from wake to wake (a continued session
+ * keeps its prompt cache). A seed without it gets no summary.
  */
 export function fillSeed(seed: string, v: { name: string; forgeUrl: string; maxSleepMs: number; github?: { org: string; user: string } }): string {
   return seed
     .replace(/^\{github\}\n/m, v.github ? githubLine(v.github) : "")
     .replaceAll("{name}", v.name)
     .replaceAll("{forge_url}", v.forgeUrl)
-    .replaceAll("{max_sleep}", humanDuration(v.maxSleepMs));
+    .replaceAll("{max_sleep}", humanDuration(v.maxSleepMs))
+    .replaceAll(ACTIVITY_PLACEHOLDER, ACTIVITY_DESCRIPTION);
 }
+
+export const ACTIVITY_PLACEHOLDER = "{activity}";
+const ACTIVITY_DESCRIPTION = "what the others did on the forge since your last wake";
+
+/** Whether the seed asks for the forge activity summary in the wake note. */
+export const seedWantsActivity = (seed: string) => seed.includes(ACTIVITY_PLACEHOLDER);
 
 /** The seed's `{github}` line (plan §4.6); the line is dropped when the run has no GitHub outlet. */
 function githubLine(gh: { org: string; user: string }): string {
@@ -134,6 +144,15 @@ export interface WakeNoteInput {
   spentUsd: number;
   /** This wake's spend cap (the tightest of per-wake max, agent and swarm remaining). */
   wakeLimitUsd: number;
+  /** The agent's average cost per finished wake in this run; absent before its first. */
+  avgWakeUsd?: number;
+  /** The world end (the run deadline, extensions included). */
+  worldEndsAt: number;
+  /**
+   * The others' forge activity since the agent's last wake (activityLines), when the seed asks for it; `since` says
+   * from when: the last wake, or (first wake) the run start.
+   */
+  activity?: { lines: string[]; since: "last_wake" | "run_start" };
   maxTurns: number;
   /** When this wake is stopped if still running (per-wake timeout, or the world end + grace). */
   stopsAt: number;
@@ -144,18 +163,30 @@ export interface WakeNoteInput {
 const usd = (v: number) => `$${v.toFixed(4)}`;
 
 /**
- * The user turn of every wake (plan §4.3): time, why, budget and this wake's limits. Kept short and factual so it
- * doesn't read as a task list; the unread line only appears when there is something unread.
+ * The user turn of every wake (plan §4.3): time, why, the others' forge activity (if the seed asks for it), budget
+ * and this wake's limits. Kept short and factual so it doesn't read as a task list; the unread line only appears
+ * when there is something unread. The budget is given as a share and in wakes at the agent's own rate, with the
+ * world end: a bare "$0.98 of $1.00" read as nearly spent to small models, which then idled with 97% unspent.
  */
 export function wakeNote(n: WakeNoteInput): string {
   const why = `${WHY[n.trigger] ?? n.trigger}${n.resumed ? ", continuing your previous session" : ""}`;
+  const left = Math.max(0, n.budgetUsd - n.spentUsd);
+  const usedPct = n.budgetUsd > 0 ? Math.round((Math.min(n.spentUsd, n.budgetUsd) / n.budgetUsd) * 100) : 100;
+  const rate = n.avgWakeUsd && n.avgWakeUsd > 0 ? ` Your wakes have averaged ${usd(n.avgWakeUsd)}, so that is ~${Math.floor(left / n.avgWakeUsd)} more at this rate.` : "";
+  const activity = n.activity
+    ? [
+        `The others on the forge since ${n.activity.since === "last_wake" ? "your last wake" : "the world began"}:${n.activity.lines.length ? "" : " nothing new."}`,
+        ...n.activity.lines.map((l) => `  ${l}`),
+      ]
+    : [];
   // The whole user turn, so it must not start with "-" (it is a bare argv element).
   return [
     `[Wake ${n.wakeSeq} at ${iso(n.now)} (UTC): ${why}.`,
     ...(n.unread > 0 ? [`Unread forge notifications: ${n.unread} (\`tea notifications ls --mine\`).`] : []),
-    `Budget: ${usd(Math.max(0, n.budgetUsd - n.spentUsd))} left of ${usd(n.budgetUsd)}.`,
-    `This wake is stopped if it spends over ${usd(n.wakeLimitUsd)}, makes ${n.maxTurns} turns, or is still running at ${iso(n.stopsAt)}.`,
-    "Past wakes' costs: /self/usage.jsonl. Prices: /self/pricing.yaml.]",
+    ...activity,
+    `Budget: ${usd(left)} left of ${usd(n.budgetUsd)} (${usedPct}% used).${rate} The world ends in ${humanDuration(n.worldEndsAt - n.now)}; budget left then is simply lost.`,
+    "Past wakes' costs: /self/usage.jsonl. Prices: /self/pricing.yaml.",
+    `Safety stops for this wake (a runaway guard, not a target): over ${usd(n.wakeLimitUsd)}, ${n.maxTurns} turns, or still running at ${iso(n.stopsAt)}.]`,
     ...(n.brief?.trim() ? ["", `[Note from the operator: ${n.brief.trim()}]`] : []),
   ].join("\n");
 }

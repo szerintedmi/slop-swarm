@@ -8,7 +8,7 @@ import { Controller, type ControllerOptions } from "../src/controller/index.ts";
 import { createRun } from "../src/controller/run.ts";
 import { agentDirs, enqueueControl, getRun, openDb, type AgentRow, type EventRow, type ExtensionRow, type RequestRow, type WakeRow } from "../src/db/index.ts";
 import { fakeAgentHost, silentLogger, type FakeAgentHost } from "./helpers/agent-host.ts";
-import { forgeHost, type ForgeApi } from "../src/forge.ts";
+import { forgeHost, type ForgeActivity, type ForgeApi } from "../src/forge.ts";
 import { parsePricing } from "../src/pricing/index.ts";
 import { renderReport } from "../src/report.ts";
 
@@ -48,6 +48,10 @@ class FakeForge implements ForgeApi {
   async unread(user: string, since?: number) {
     return this.notes.filter((n) => n.user === user && !n.read && (since === undefined || n.ts > since)).length;
   }
+  acts: (ForgeActivity & { user: string })[] = [];
+  async activity(user: string, since: number) {
+    return this.acts.filter((a) => a.user === user && a.at > since);
+  }
 }
 
 interface Harness {
@@ -72,11 +76,11 @@ interface Harness {
 function harness(
   cfg: SwarmConfig,
   behave: (agent: string, argv: string[]) => string | null,
-  opts: { killMisses?: number; pricingYaml?: string; wakeDeps?: ControllerOptions["wakeDeps"] } = {},
+  opts: { killMisses?: number; pricingYaml?: string; seedText?: string; wakeDeps?: ControllerOptions["wakeDeps"] } = {},
 ): Harness {
   const db = openDb(":memory:");
   const clock = { t: T0 };
-  const runId = createRun(db, cfg, { cliVersions: { claude: "2.1.296" }, pricingYaml: opts.pricingYaml }, T0);
+  const runId = createRun(db, cfg, { cliVersions: { claude: "2.1.296" }, pricingYaml: opts.pricingYaml, seedText: opts.seedText }, T0);
   // Emit the first usage-bearing lines, then hang until killed.
   const agentHost = fakeAgentHost({ dataDir, behave, killMisses: opts.killMisses, hangOutput: FIXTURE.split("\n").slice(0, 3).join("\n") + "\n" });
   const forge = new FakeForge();
@@ -268,6 +272,28 @@ describe("controller", () => {
     expect(errs.length).toBeGreaterThan(0);
   });
 
+  test("wake note: the others' forge activity when the seed has {activity}, since the last wake", async () => {
+    const seed = readFileSync(config().paths.seed, "utf8") + "Each wake begins with a note: {activity}.\n";
+    const h = harness(config(), (agent) => {
+      if (agent === "bramble") writeFileSync(join(h.dirs(agent).home, "next_wake.yaml"), "in_minutes: 10\n");
+      return FIXTURE;
+    }, { seedText: seed });
+    h.ctl.repo.updateAgent("thistle", { status: "paused" });
+    h.forge.acts.push({ user: "thistle", op: "create_repo", at: T0 - 1, repo: "thistle/old" }); // before the run
+    h.forge.acts.push({ user: "thistle", op: "commit_repo", at: T0 + 1, repo: "thistle/flock", commits: 2 });
+    h.clock.t = T0 + 1000;
+    h.ctl.tick();
+    await h.ctl.whenIdle();
+    const note = (i: number) => h.argvs[i]![h.argvs[i]!.indexOf("-p") + 1]!;
+    expect(note(0)).toContain("The others on the forge since the world began:\n  @thistle: 2 commits to thistle/flock\nBudget:");
+    expect(readFileSync(join(h.dirs("bramble").runtime, "system-prompt.md"), "utf8")).toContain("what the others did on the forge since your last wake");
+
+    h.clock.t = T0 + 11 * MIN;
+    h.ctl.tick();
+    await h.ctl.whenIdle();
+    expect(note(1)).toContain("The others on the forge since your last wake: nothing new.\nBudget:");
+  });
+
   test("per-wake budget kills the container", async () => {
     const h = harness(config({ perWakeMaxUsd: 0.0001 }), () => null);
     h.ctl.tick();
@@ -287,9 +313,9 @@ describe("controller", () => {
     h.clock.t = T0 + 2 * 60 * MIN + 1000; // it is still running 1 s after
     await h.ctl.whenIdle();
     const wArgv = h.argvs[0]!;
-    // The note gives the real stop time (world end + grace) without mentioning the world end.
-    expect(wArgv[wArgv.indexOf("-p") + 1]).toContain(`is still running at ${new Date(T0 + 2 * 60 * MIN).toISOString().replace(/\.\d+Z$/, "Z")}.`);
-    expect(wArgv[wArgv.indexOf("-p") + 1]).not.toContain("world");
+    // The note gives the real stop time (world end + grace).
+    expect(wArgv[wArgv.indexOf("-p") + 1]).toContain(`still running at ${new Date(T0 + 2 * 60 * MIN).toISOString().replace(/\.\d+Z$/, "Z")}.]`);
+    expect(wArgv[wArgv.indexOf("-p") + 1]).toContain("The world ends in ");
     const [w] = wakesOf(h, "bramble");
     expect(w!.exit_reason).toBe("world_end");
     expect(h.kills).toHaveLength(2); // retried until the process was gone
