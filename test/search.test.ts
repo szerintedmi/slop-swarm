@@ -4,12 +4,13 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHandler, exaBody, formatResults, lookupToken, parseParams, type RelayDeps } from "../docker/search/relay.ts";
+import { createHandler, exaBody, formatResults, lookupToken, parseParams, relayLogger, type RelayDeps } from "../docker/search/relay.ts";
 import { loadSwarm, parseAgent, parseSwarm, type SwarmConfig } from "../src/config.ts";
 import { Controller } from "../src/controller/index.ts";
 import { createRun } from "../src/controller/run.ts";
-import type { ProcessHandle } from "../src/controller/wake.ts";
-import { agentDirs, openDb, type AgentRow, type RequestRow, type WakeRow } from "../src/db/index.ts";
+import { openDb, type AgentRow, type RequestRow, type WakeRow } from "../src/db/index.ts";
+import { runnerRelayDirs } from "../src/runner/runner.ts";
+import { fakeAgentHost, silentLogger } from "./helpers/agent-host.ts";
 import { loadPricing, parsePricing, PricingError, searchCost } from "../src/pricing/index.ts";
 import { renderReport } from "../src/report.ts";
 import {
@@ -102,6 +103,38 @@ describe("relay request parsing", () => {
     expect(text).toContain("1. What it costs to keep an agent running\n   https://example.org/blog/agent-costs (2026-09-28)\n   Most of the cost of an idle agent is the first request of every wake: the system prompt");
     expect(text).toContain("3. (untitled)\n   https://example.net/no-highlights\n");
     expect(formatResults("nothing", [])).toBe("No results for: nothing");
+  });
+});
+
+describe("relay process log", () => {
+  test("structured JSON lines (src/log.ts field names): outcomes, refusals; never the query or the key", async () => {
+    const d = scratch();
+    const runtime = mkdtempSync(join(dataDir, "rt-"));
+    const lines: string[] = [];
+    const file = join(d.log, "relay.jsonl");
+    mkdirSync(d.log, { recursive: true });
+    const processLog = relayLogger({ world: "w1", file, out: (l) => lines.push(l), now: () => Date.UTC(2026, 9, 13) });
+    const { handler } = relay(d, { processLog });
+    expect((await handler(search(null, { query: "secret plans" }))).status).toBe(401);
+    issueSearchToken(d, runtime, "wren", 7);
+    expect((await handler(search(tokenOf(runtime), { query: "secret plans" }))).status).toBe(200);
+    const parsed = lines.map((l) => JSON.parse(l));
+    expect(parsed[0]).toEqual({ timestamp: "2026-10-13T00:00:00.000Z", severity_text: "WARN", body: "search refused: no valid token", "service.name": "relay", "slopswarm.world": "w1", "http.response.status_code": 401 });
+    expect(parsed[1]).toMatchObject({ severity_text: "INFO", body: "search 200, 3 result(s)", "slopswarm.world": "w1", "slopswarm.agent": "wren", "slopswarm.wake_id": 7, "http.response.status_code": 200 });
+    expect(lines.join()).not.toContain("secret plans");
+    expect(lines.join()).not.toContain(KEY);
+    // The same lines in the file the runner serves.
+    expect(readFileSync(file, "utf8").trim().split("\n")).toEqual(lines);
+  });
+
+  test("the runner's log merges each world relay's log, by time", async () => {
+    const { fakeAgentHost } = await import("./helpers/agent-host.ts");
+    const h = fakeAgentHost({ dataDir: mkdtempSync(join(dataDir, "rlog-")), behave: () => "" });
+    const relayDirs = (await import("../src/runner/runner.ts")).runnerRelayDirs(h.runnerDir, "w1");
+    mkdirSync(relayDirs.log, { recursive: true });
+    writeFileSync(relayDirs.processLogFile, JSON.stringify({ timestamp: "2026-10-13T00:00:01.000Z", severity_text: "INFO", body: "search 200", "service.name": "relay", "slopswarm.world": "w1" }) + "\n");
+    const logs = await h.host.logs(0);
+    expect(logs.map((l) => `${l["service.name"]} ${l.body}`)).toContain("relay search 200");
   });
 });
 
@@ -369,7 +402,6 @@ function config(): SwarmConfig {
       budgets: { swarm_usd: 1, per_agent_usd: 0.5, per_wake: { max_usd: 0.1, max_turns: 10, timeout_min: 5 } },
       scheduler: { max_sleep_min: 15, max_concurrent_wakes: 1 },
       controller: { tick_s: 1 },
-      network: { name: "slopswarm-internal", proxy: "http://slopswarm-proxy:8888", allowlist: ["api.anthropic.com"] },
     },
     (name) => ({ name, harness: "claude", model: "claude-haiku-5-5", effort: "medium", ...(name === "wren" ? { search: "relay" } : {}) }),
   );
@@ -378,39 +410,42 @@ function config(): SwarmConfig {
 
 describe("searches billed to the wake", () => {
   beforeEach(() => {
-    for (const d of ["runs"]) rmSync(join(dataDir, d), { recursive: true, force: true });
+    for (const d of ["runs", "worlds", "runner"]) rmSync(join(dataDir, d), { recursive: true, force: true });
   });
 
   test("a relay search counts in the wake's cost, the agent's spend and the report", async () => {
     const db = openDb(":memory:");
     const cfg = config();
     const runId = createRun(db, cfg, {}, T0);
-    const dirs = runSearchDirs(runId);
-    mkdirSync(dirs.log, { recursive: true });
-    const argvs: string[][] = [];
     const tokensSeen: Record<string, boolean> = {};
-    const startProcess = (argv: string[]): ProcessHandle => {
-      argvs.push(argv);
-      const agent = argv.find((a) => a.startsWith("slopswarm.agent="))!.split("=")[1]!;
-      const tp = tokenPath(agentDirs(runId, agent).runtime);
-      tokensSeen[agent] = existsSync(tp);
-      const done = (async () => {
-        // The agent runs `websearch` once mid-wake: the relay authenticates its token and logs the search.
-        if (agent === "wren") {
-          const res = await relay(dirs).handler(search(readFileSync(tp, "utf8").trim(), { query: "agent costs" }));
-          expect(res.status).toBe(200);
-        }
-      })();
-      const stdout = new ReadableStream<Uint8Array>({
-        async start(c) {
-          await done;
-          c.enqueue(new TextEncoder().encode(FIXTURE));
-          c.close();
-        },
-      });
-      return { stdout, exited: done.then(() => 0) };
-    };
-    const ctl = new Controller(db, runId, cfg, { forge: { unread: async () => 0 }, log: () => {}, now: () => T0, wakeDeps: { startProcess, killContainer: async () => {} } });
+    // The relay on the agent host: the runner's world relay dir.
+    let dirs!: ReturnType<typeof runnerRelayDirs>;
+    const agentHost = fakeAgentHost({
+      dataDir,
+      behave: (agent) => {
+        const tp = tokenPath(agentHost.dirs(runId, agent).runtime);
+        tokensSeen[agent] = existsSync(tp);
+        return (async () => {
+          // The agent runs `websearch` once mid-wake: the relay authenticates its token and logs the search.
+          if (agent === "wren") {
+            const res = await relay(dirs).handler(search(readFileSync(tp, "utf8").trim(), { query: "agent costs" }));
+            expect(res.status).toBe(200);
+          }
+          return FIXTURE;
+        })();
+      },
+    });
+    dirs = runnerRelayDirs(agentHost.runnerDir, runId);
+    mkdirSync(dirs.log, { recursive: true });
+    const argvs = agentHost.argvs;
+    const ctl = new Controller(db, runId, cfg, {
+      forge: { unread: async () => 0 },
+      host: agentHost.host,
+      image: "slopswarm-agent:test",
+      logger: silentLogger,
+      now: () => T0,
+      wakeDeps: { forgeToken: () => "forge-token", outputPollMs: 1 },
+    });
 
     ctl.tick();
     await ctl.whenIdle();
@@ -451,8 +486,8 @@ describe("searches billed to the wake", () => {
     expect(JSON.parse(readFileSync(dirs.tokensFile, "utf8"))).toEqual({});
 
     // The agent sees the search price in /self/pricing.yaml; the report shows searches and Exa's cross-check.
-    expect(readFileSync(join(agentDirs(runId, "wren").self, "pricing.yaml"), "utf8")).toContain(SEARCH_MODEL);
-    expect(readFileSync(join(agentDirs(runId, "bramble").self, "pricing.yaml"), "utf8")).not.toContain(SEARCH_MODEL);
+    expect(readFileSync(join(agentHost.dirs(runId, "wren").self, "pricing.yaml"), "utf8")).toContain(SEARCH_MODEL);
+    expect(readFileSync(join(agentHost.dirs(runId, "bramble").self, "pricing.yaml"), "utf8")).not.toContain(SEARCH_MODEL);
     const report = renderReport(db, runId, T0 + 60_000);
     expect(report).toContain("API requests: 6, relay web searches: 1");
     expect(report).toContain("## Web search (relay)");

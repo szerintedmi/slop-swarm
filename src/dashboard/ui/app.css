@@ -93,3 +93,9 @@ button:hover{border-color:var(--accent)}button.danger{border-color:var(--bad);co
 .live{font-size:12px;color:var(--ok)}.live::before{content:"● "}
 .empty{color:var(--muted);padding:14px;border:1px dashed var(--line);border-radius:8px;text-align:center}
 .ok{color:var(--ok)}.err{color:var(--bad)}
+/* forms (launch, config) */
+input,select,textarea{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:6px;padding:3px 8px}
+textarea{width:100%;resize:vertical}textarea.code{font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--code)}
+label{font-size:12px;color:var(--muted)}label.block{display:block;margin:8px 0}label.block > input,label.block > textarea{display:block;margin-top:2px;color:var(--fg)}
+form.launch{display:grid;gap:4px;max-width:720px}
+button:disabled{opacity:.5;cursor:default}

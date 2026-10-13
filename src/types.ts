@@ -127,6 +127,11 @@ export interface HarnessAdapter {
    * search tool off (CommandOptions.nativeSearch), so a relay agent never has both.
    */
   readonly searchModes: readonly [SearchMode, ...SearchMode[]];
+  /**
+   * The runtime subdir holding the session files `finalizeUsage` reads (Claude `projects/`, Codex and pi
+   * `sessions/`); the controller mirrors the wake's files from the agent host into a local copy of it.
+   */
+  readonly sessionDir: "projects" | "sessions";
   /** argv to run inside the container (cwd = /home/agent). */
   buildCommand(o: CommandOptions): string[];
   /** Extra container env, e.g. CLAUDE_CONFIG_DIR / CODEX_HOME pointing at the runtime mount. */

@@ -1,0 +1,15 @@
+# /etc/slopswarm/deploy.conf: read by deploy/vps/bootstrap.sh (shell syntax; root-only). Created from this file on
+# the first run.
+
+# Public key of the CI deploy key (the private half is the GitHub secret DEPLOY_SSH_KEY). Its login can only run
+# slopswarm-deploy. Make it on the laptop: ssh-keygen -t ed25519 -N '' -C slopswarm-ci-deploy -f ~/.ssh/slopswarm-ci-deploy
+CI_DEPLOY_PUBKEY=""
+
+# Tailscale: the node's name (its MagicDNS name: VPS_SSH_HOST in CI, HostName in ~/.ssh/config) and its ACL tag
+# (docs/deploy.md §1; the tag must exist in the tailnet policy's tagOwners before the node can join with it).
+TS_HOSTNAME=slopswarm-vps
+TS_TAGS=tag:swarm-control
+
+# Optional: a pre-authorized auth key for that tag (admin console → Settings → Keys). Without it, the first run prints
+# a login URL to open in the browser. Clear it after the node has joined.
+TS_AUTHKEY=""

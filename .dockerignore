@@ -1,0 +1,13 @@
+# Never in an image: secrets, run data, local builds.
+.env
+.env.*
+!.env.example
+secrets/
+data/
+node_modules/
+build/
+.svelte-kit/
+.git/
+docker/proxy/filter
+*.log
+.DS_Store

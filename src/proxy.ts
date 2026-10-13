@@ -66,7 +66,7 @@ export async function buildImages(): Promise<void> {
   await sh(["docker", "compose", "-f", COMPOSE_FILE, "build"]);
 }
 
-async function buildAgentImage(): Promise<void> {
+export async function buildAgentImage(): Promise<void> {
   await sh(["docker", "build", "-f", AGENT_DOCKERFILE, "-t", AGENT_IMAGE, join(REPO, "docker")]);
 }
 

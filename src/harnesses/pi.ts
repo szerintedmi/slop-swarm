@@ -156,6 +156,7 @@ export const piAdapter: HarnessAdapter = {
   maxTurnsBy: "turns",
   // pi has no search tool of its own.
   searchModes: ["relay"],
+  sessionDir: "sessions",
 
   buildCommand(o: CommandOptions): string[] {
     const mount = "/runtime";

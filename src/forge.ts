@@ -1,8 +1,10 @@
-// The run's Forgejo (plan §4.5): the agents' shared world. One forge per run, on the internal network
-// only, plus a forwarder that publishes it on 127.0.0.1 for the owner (and the controller's API calls).
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { runDir } from "./db/index.ts";
+// A world's Forgejo (plan §4.5; docs/plans/2026-10-12-hosted-control-plane.md §3): the agents' shared space. One
+// forge per world (never one shared instance), on the internal network only, plus a forwarder that publishes it on
+// 127.0.0.1 for the owner (and the controller's API calls). The hostname comes from the world id, so saved git
+// remotes in homes stay valid across runs.
+import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { worldAgentDirs, worldDirs } from "./db/index.ts";
 import { MOUNTS } from "./docker.ts";
 import { GITHUB_GITCONFIG_IN } from "./github.ts";
 
@@ -14,49 +16,76 @@ const TOKEN_NAME = "slopswarm";
 const EMAIL_DOMAIN = "slopswarm.local";
 
 /** Container name = the hostname agents use. Kept within a DNS label (63 chars). */
-export function forgeHost(runId: string): string {
-  const name = `slopswarm-forge-${runId}`.replace(/[^a-zA-Z0-9-]/g, "-");
+export function forgeHost(world: string): string {
+  const name = `slopswarm-forge-${world}`.replace(/[^a-zA-Z0-9-]/g, "-");
   if (name.length <= 63) return name;
   const h = new Bun.CryptoHasher("sha256").update(name).digest("hex").slice(0, 8);
   return `${name.slice(0, 54)}-${h}`;
 }
-export const forgeUrl = (runId: string) => `http://${forgeHost(runId)}:${FORGE_PORT_IN}`;
-export const forgeDataDir = (runId: string) => join(runDir(runId), "forge");
+export const forgeUrl = (world: string) => `http://${forgeHost(world)}:${FORGE_PORT_IN}`;
+export const forgeDataDir = (world: string) => worldDirs(world).forge;
+
+/**
+ * The world's public read-only forge URL (§7): `https://<world>.<PUBLIC_FORGE_DOMAIN>/`, or undefined without a domain.
+ * The domain lives in the VPS env file only (unlisted, never committed).
+ */
+export function publicForgeUrl(world: string, domain = process.env.PUBLIC_FORGE_DOMAIN?.trim()): string | undefined {
+  if (!domain) return undefined;
+  return `https://${publicForgeLabel(world)}.${domain.replace(/^\.+|\/+$/g, "")}/`;
+}
+
+/** The world's subdomain label: lowercase letters, digits and hyphens, at most 63. */
+export function publicForgeLabel(world: string): string {
+  return world.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
+}
+
+/** Login files in an agent's runtime dir, relative to it (mounted at /runtime). */
+export const LOGIN_FILES = {
+  token: "forge/token",
+  gitconfig: "forge/gitconfig",
+  credentials: "forge/git-credentials",
+  tea: "xdg/tea/config.yml",
+} as const;
 
 /** Files in an agent's runtime dir that log git and tea in as the agent (mounted at /runtime). */
 export function loginPaths(runtimeDir: string) {
   return {
-    token: join(runtimeDir, "forge", "token"),
-    gitconfig: join(runtimeDir, "forge", "gitconfig"),
-    credentials: join(runtimeDir, "forge", "git-credentials"),
-    tea: join(runtimeDir, "xdg", "tea", "config.yml"),
+    token: join(runtimeDir, LOGIN_FILES.token),
+    gitconfig: join(runtimeDir, LOGIN_FILES.gitconfig),
+    credentials: join(runtimeDir, LOGIN_FILES.credentials),
+    tea: join(runtimeDir, LOGIN_FILES.tea),
   };
 }
 
 /** Container env for an agent's wake: where the forge is and where its logins live. */
-export function forgeEnv(runId: string): Record<string, string> {
+export function forgeEnv(world: string): Record<string, string> {
   return {
-    FORGE_URL: forgeUrl(runId),
+    FORGE_URL: forgeUrl(world),
     GIT_CONFIG_GLOBAL: `${MOUNTS.runtime}/forge/gitconfig`,
     XDG_CONFIG_HOME: `${MOUNTS.runtime}/xdg`,
   };
 }
 
-/** Write the agent's git + tea login files. Paths inside them are container paths. */
-export function writeAgentLogin(runtimeDir: string, runId: string, user: string, token: string): void {
-  const p = loginPaths(runtimeDir);
-  const url = forgeUrl(runId);
-  mkdirSync(join(runtimeDir, "forge"), { recursive: true });
-  mkdirSync(join(runtimeDir, "xdg", "tea"), { recursive: true });
-  const secret = (path: string, text: string) => {
-    writeFileSync(path, text);
-    chmodSync(path, 0o600);
-  };
-  secret(p.token, token + "\n");
-  secret(p.credentials, `http://${user}:${token}@${forgeHost(runId)}:${FORGE_PORT_IN}\n`);
-  writeFileSync(
-    p.gitconfig,
-    [
+export interface RuntimeFile {
+  /** Relative to the runtime dir. */
+  path: string;
+  content: string;
+  mode: number;
+}
+
+/**
+ * The agent's git + tea login files (paths inside them are container paths), rewritten into its runtime dir by
+ * every prepare. `publicUrl`: the forge's public ROOT_URL (§7), mapped back to the internal forge for git.
+ */
+export function agentLoginFiles(world: string, user: string, token: string, o: { publicUrl?: string } = {}): RuntimeFile[] {
+  const url = forgeUrl(world);
+  return [
+    { path: LOGIN_FILES.token, content: token + "\n", mode: 0o600 },
+    { path: LOGIN_FILES.credentials, content: `http://${user}:${token}@${forgeHost(world)}:${FORGE_PORT_IN}\n`, mode: 0o600 },
+    {
+      path: LOGIN_FILES.gitconfig,
+      mode: 0o644,
+      content: [
       "[user]",
       `\tname = ${user}`,
       `\temail = ${user}@${EMAIL_DOMAIN}`,
@@ -64,15 +93,18 @@ export function writeAgentLogin(runtimeDir: string, runId: string, user: string,
       `\thelper = store --file=${MOUNTS.runtime}/forge/git-credentials`,
       "[init]",
       "\tdefaultBranch = main",
+      // Clone links on the public forge pages use its public URL; git stays on the internal forge.
+      ...(o.publicUrl ? [`[url "${url}/"]`, `\tinsteadOf = ${o.publicUrl.replace(/\/*$/, "/")}`] : []),
       // The GitHub login (github.ts), when the run has one. Last, so its github.com helper reset wins.
       "[include]",
       `\tpath = ${GITHUB_GITCONFIG_IN}`,
       "",
     ].join("\n"),
-  );
-  secret(
-    p.tea,
-    [
+    },
+    {
+      path: LOGIN_FILES.tea,
+      mode: 0o600,
+      content: [
       "logins:",
       "  - name: forge",
       `    url: ${url}`,
@@ -83,7 +115,18 @@ export function writeAgentLogin(runtimeDir: string, runId: string, user: string,
       "  editor: false",
       "",
     ].join("\n"),
-  );
+    },
+  ];
+}
+
+/** Write the agent's login files into a local runtime dir (preflight). */
+export function writeAgentLogin(runtimeDir: string, world: string, user: string, token: string): void {
+  for (const f of agentLoginFiles(world, user, token)) {
+    const p = join(runtimeDir, f.path);
+    mkdirSync(dirname(p), { recursive: true });
+    writeFileSync(p, f.content);
+    chmodSync(p, f.mode);
+  }
 }
 
 export interface ForgeAdmin {
@@ -195,30 +238,44 @@ export class ForgeClient implements ForgeApi {
   }
 }
 
-/** Create (or re-key) every agent's account and write its login files into its runtime dir. */
-export async function provisionAgents(client: ForgeClient, runId: string, agents: { name: string; runtimeDir: string }[]): Promise<void> {
-  for (const a of agents) {
-    const p = loginPaths(a.runtimeDir);
-    const existing = existsSync(p.token) ? readFileSync(p.token, "utf8").trim() : undefined;
-    const token = await client.ensureAgent(a.name, existing);
-    writeAgentLogin(a.runtimeDir, runId, a.name, token);
+/** An agent's stored forge token in its world (controller side, 0600), if any. */
+export function forgeToken(world: string, agent: string): string | undefined {
+  const p = worldAgentDirs(world, agent).forgeToken;
+  return existsSync(p) ? readFileSync(p, "utf8").trim() || undefined : undefined;
+}
+
+/**
+ * Create (or re-key) every agent's account in the world's forge and store its token on the controller's side; the
+ * login files are written into the agent's runtime dir by each wake's prepare.
+ */
+export async function provisionAgents(client: ForgeClient, world: string, agents: string[]): Promise<void> {
+  for (const name of agents) {
+    const token = await client.ensureAgent(name, forgeToken(world, name));
+    const p = worldAgentDirs(world, name).forgeToken;
+    mkdirSync(dirname(p), { recursive: true, mode: 0o700 });
+    writeFileSync(p, token + "\n", { mode: 0o600 });
+    chmodSync(p, 0o600);
   }
 }
 
 /** `docker run` argv for the forge itself. No published port and no route out (plan §4.5). */
-export function forgeRunArgs(o: { runId: string; image: string; network: string }): string[] {
-  const host = forgeHost(o.runId);
+export function forgeRunArgs(o: { world: string; image: string; network: string; publicUrl?: string }): string[] {
+  const host = forgeHost(o.world);
+  // With a public URL (§7) it is ROOT_URL, so pages and clone links are right; agents' git maps it back (agentLoginFiles).
+  const rootUrl = o.publicUrl ? o.publicUrl.replace(/\/*$/, "/") : `${forgeUrl(o.world)}/`;
   const ini: Record<string, string> = {
     security__INSTALL_LOCK: "true",
     database__DB_TYPE: "sqlite3",
-    server__ROOT_URL: `${forgeUrl(o.runId)}/`,
-    server__DOMAIN: host,
+    server__ROOT_URL: rootUrl,
+    server__DOMAIN: o.publicUrl ? new URL(rootUrl).hostname : host,
     server__HTTP_PORT: String(FORGE_PORT_IN),
     server__DISABLE_SSH: "true",
     server__START_SSH_SERVER: "false",
     server__OFFLINE_MODE: "true",
     service__DISABLE_REGISTRATION: "true",
     service__DEFAULT_KEEP_EMAIL_PRIVATE: "true",
+    // Anonymous visitors may read public repos (the public forge, §7); private repos stay private.
+    service__REQUIRE_SIGNIN_VIEW: "false",
     // Server-side fetches would bypass the egress proxy; the forge has no route out anyway.
     repository__DISABLE_MIGRATIONS: "true",
     mirror__ENABLED: "false",
@@ -228,7 +285,7 @@ export function forgeRunArgs(o: { runId: string; image: string; network: string 
   return [
     "docker", "run", "-d", "--rm",
     "--name", host,
-    "--label", `slopswarm.forge=${o.runId}`,
+    "--label", `slopswarm.forge=${o.world}`,
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
     "--read-only",
@@ -237,29 +294,49 @@ export function forgeRunArgs(o: { runId: string; image: string; network: string 
     "--memory", "1g",
     "--pids-limit", "512",
     "--network", o.network,
-    "-v", `${forgeDataDir(o.runId)}:/var/lib/gitea:rw`,
+    "-v", `${forgeDataDir(o.world)}:/var/lib/gitea:rw`,
     ...Object.entries(ini).flatMap(([k, v]) => ["-e", `FORGEJO__${k}=${v}`]),
     o.image,
   ];
 }
 
-/** `docker run` argv for the forwarder: 127.0.0.1:<port> -> forge:3000. */
-export function forwarderRunArgs(o: { runId: string; network: string; hostPort: number }): string[] {
-  const host = forgeHost(o.runId);
+/**
+ * `docker run` argv for the forwarder: 127.0.0.1:<port> -> forge:3000. `publish`: more host addresses on the same
+ * port, e.g. the VPS's tailnet address, so a remote agent host's forwarder reaches this world's forge and no other
+ * (one port per world: the forge router of docs/plans/2026-10-12-hosted-control-plane.md §2.5).
+ */
+export function forwarderRunArgs(o: { world: string; network: string; hostPort: number; publish?: string[] }): string[] {
+  const host = forgeHost(o.world);
   return [
     "docker", "run", "-d", "--rm",
     "--name", `${host}-port`.slice(0, 63),
-    "--label", `slopswarm.forge=${o.runId}`,
+    "--label", `slopswarm.forge=${o.world}`,
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
     "--read-only",
     "--network", EGRESS_NETWORK,
     "--network", o.network,
     "-p", `127.0.0.1:${o.hostPort}:${FORGE_PORT_IN}`,
+    ...(o.publish ?? []).flatMap((ip) => ["-p", `${ip}:${o.hostPort}:${FORGE_PORT_IN}`]),
     FORWARDER_IMAGE,
     `TCP-LISTEN:${FORGE_PORT_IN},fork,reuseaddr`,
     `TCP:${host}:${FORGE_PORT_IN}`,
   ];
+}
+
+/** The rootless Forgejo image's user. */
+const FORGE_UID = 1000;
+
+/**
+ * Create the internal and egress networks if missing (the VPS, where no proxy compose runs; locally the proxy's
+ * compose file owns them and this is not called). The internal one has no route out.
+ */
+export async function ensureNetworks(internal: string): Promise<void> {
+  for (const [name, flags] of [[internal, ["--internal"]], [EGRESS_NETWORK, []]] as const) {
+    if ((await docker(["docker", "network", "inspect", name])).code === 0) continue;
+    const r = await docker(["docker", "network", "create", ...flags, name]);
+    if (r.code !== 0 && !/already exists/.test(r.err)) throw new Error(`docker network create ${name}: ${r.err.trim()}`);
+  }
 }
 
 async function docker(argv: string[], env?: Record<string, string>): Promise<{ code: number; out: string; err: string }> {
@@ -269,8 +346,8 @@ async function docker(argv: string[], env?: Record<string, string>): Promise<{ c
 }
 
 /** Remove this run's forge containers (the data stays on disk). */
-export async function stopForge(runId: string): Promise<void> {
-  const ps = await docker(["docker", "ps", "-aq", "--filter", `label=slopswarm.forge=${runId}`]);
+export async function stopForge(world: string): Promise<void> {
+  const ps = await docker(["docker", "ps", "-aq", "--filter", `label=slopswarm.forge=${world}`]);
   const ids = ps.out.split("\n").map((s) => s.trim()).filter(Boolean);
   if (ids.length) await docker(["docker", "rm", "-f", ...ids]);
 }
@@ -279,14 +356,16 @@ export async function stopForge(runId: string): Promise<void> {
  * Start the run's forge and forwarder (replacing leftovers from a crashed controller), create the
  * owner's admin account on first start, and return a client. Throws with a hint if the port is taken.
  */
-export async function startForge(o: { runId: string; image: string; network: string; hostPort: number; admin: ForgeAdmin }): Promise<ForgeClient> {
-  await stopForge(o.runId);
-  mkdirSync(forgeDataDir(o.runId), { recursive: true });
+export async function startForge(o: { world: string; image: string; network: string; hostPort: number; admin: ForgeAdmin; publish?: string[]; publicUrl?: string }): Promise<ForgeClient> {
+  await stopForge(o.world);
+  mkdirSync(forgeDataDir(o.world), { recursive: true });
+  // The rootless forge runs as uid 1000: a controller running as root (the VPS) hands it its data dir.
+  if (process.getuid?.() === 0) chownSync(forgeDataDir(o.world), FORGE_UID, FORGE_UID);
   const f = await docker(forgeRunArgs(o));
   if (f.code !== 0) throw new Error(`forge did not start: ${f.err.trim()}`);
   const w = await docker(forwarderRunArgs(o));
   if (w.code !== 0) {
-    await stopForge(o.runId);
+    await stopForge(o.world);
     const taken = /already allocated|address already in use/i.test(w.err);
     throw new Error(
       taken
@@ -300,7 +379,7 @@ export async function startForge(o: { runId: string; image: string; network: str
     // The password goes in by env, never argv (plan §7.3).
     const r = await docker(
       [
-        "docker", "exec", "-e", "FORGE_ADMIN_PASSWORD", forgeHost(o.runId), "sh", "-c",
+        "docker", "exec", "-e", "FORGE_ADMIN_PASSWORD", forgeHost(o.world), "sh", "-c",
         'forgejo admin user create --admin --username "$0" --email "$0@' + EMAIL_DOMAIN + '" --password "$FORGE_ADMIN_PASSWORD" --must-change-password=false',
         o.admin.user,
       ],

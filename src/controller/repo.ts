@@ -5,7 +5,11 @@ import { priceKey } from "../pricing/index.ts";
 import type { CostBreakdown, RequestUsage } from "../types.ts";
 
 export class Repo {
-  constructor(readonly db: Database, readonly runId: string) {}
+  /** The run's world (its own id for runs from before worlds). */
+  readonly world: string;
+  constructor(readonly db: Database, readonly runId: string) {
+    this.world = db.query<{ w: string | null }, [string]>("SELECT world_id AS w FROM runs WHERE id = ?").get(runId)?.w ?? runId;
+  }
 
   agents(): AgentRow[] {
     return this.db.query<AgentRow, [string]>("SELECT * FROM agents WHERE run_id = ? ORDER BY rowid").all(this.runId);
@@ -65,6 +69,22 @@ export class Repo {
     // An OpenRouter preset reference is priced as the model before the `@`.
     return [...new Set([priceKey(this.agent(agent).model), ...billed])];
   }
+  /** Finished wakes of the agent in every run of the world, oldest first. */
+  worldWakes(agent: string): WakeRow[] {
+    return this.db
+      .query<WakeRow, [string, string]>(
+        "SELECT w.* FROM wakes w JOIN runs r ON r.id = w.run_id WHERE COALESCE(r.world_id, r.id) = ? AND w.agent = ? AND w.ended_at IS NOT NULL ORDER BY w.started_at",
+      )
+      .all(this.world, agent);
+  }
+  /** Carry-over state of the agent in the world (session, home generation). */
+  updateWorldAgent(world: string, name: string, fields: { last_session_id?: string | null; continue_next?: number }): void {
+    const keys = Object.keys(fields);
+    if (!keys.length) return;
+    this.db
+      .query(`UPDATE world_agents SET ${keys.map((k) => `${k} = ?`).join(", ")} WHERE world_id = ? AND name = ?`)
+      .run(...(Object.values(fields) as (string | number | null)[]), world, name);
+  }
   openWakes(): WakeRow[] {
     return this.db.query<WakeRow, [string]>("SELECT * FROM wakes WHERE run_id = ? AND ended_at IS NULL").all(this.runId);
   }
@@ -86,12 +106,14 @@ export class Repo {
     })();
   }
 
-  /** Request ids billed to the agent's other wakes (a resumed session file repeats them). */
+  /** Request ids billed to the agent's other wakes in the world (a resumed session file repeats them, across runs too). */
   billedRequestIds(agent: string, exceptWakeId: number): Set<string> {
     return new Set(
       this.db
-        .query<{ request_id: string }, [string, string, number]>("SELECT request_id FROM requests WHERE run_id = ? AND agent = ? AND wake_id != ?")
-        .all(this.runId, agent, exceptWakeId)
+        .query<{ request_id: string }, [string, string, number]>(
+          "SELECT q.request_id FROM requests q JOIN runs r ON r.id = q.run_id WHERE COALESCE(r.world_id, r.id) = ? AND q.agent = ? AND q.wake_id != ?",
+        )
+        .all(this.world, agent, exceptWakeId)
         .map((r) => r.request_id),
     );
   }
@@ -125,10 +147,12 @@ export class Repo {
     this.db
       .query("UPDATE runs SET status = ?, stop_reason = COALESCE(?, stop_reason), ended_at = COALESCE(?, ended_at) WHERE id = ?")
       .run(status, stopReason, ended, this.runId);
+    if (ended) this.db.query("UPDATE worlds SET status = 'idle' WHERE id = ? AND status = 'active'").run(this.world);
   }
   /** Back to running after a stop or the end (resume, extension): the old end no longer applies. */
   reopenRun(): void {
     this.db.query("UPDATE runs SET status = 'running', stop_reason = NULL, ended_at = NULL WHERE id = ?").run(this.runId);
+    this.db.query("UPDATE worlds SET status = 'active' WHERE id = ? AND status = 'idle'").run(this.world);
   }
   /** Whether anything has happened since the run was created (a controller ran it before). */
   hasHistory(): boolean {

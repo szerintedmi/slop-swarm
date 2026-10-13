@@ -22,9 +22,12 @@
   <nav class="tabs">
     <a href="/{q}" class:on={page.url.pathname === '/'} aria-current={page.url.pathname === '/' ? 'page' : undefined}>Overview</a>
     <a href="/agents{q}" class:on={page.url.pathname.startsWith('/agent')} aria-current={page.url.pathname.startsWith('/agent') ? 'page' : undefined}>Agents</a>
+    <a href="/worlds" class:on={page.url.pathname.startsWith('/world')} aria-current={page.url.pathname.startsWith('/world') ? 'page' : undefined}>Worlds</a>
+    <a href="/config" class:on={page.url.pathname === '/config'} aria-current={page.url.pathname === '/config' ? 'page' : undefined}>Config</a>
     {#if data.forgeUrl}<a href={data.forgeUrl} target="_blank" rel="noopener">Forge ↗</a>{/if}
   </nav>
   <span class="spacer"></span>
+  {#if data.diskLow}<span class="err small" title="free space on the data disk">disk {Math.round(data.diskLow.freeRatio * 100)}% free ({Math.round(data.diskLow.freeBytes / 1073741824 * 10) / 10} GB)</span>{/if}
   {#if data.live}<span class="live">live</span>{/if}
   {#if data.readonly}<span class="ro">read-only</span>{/if}
   {#if data.runs.length}

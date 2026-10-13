@@ -8,3 +8,7 @@ secrets/
 
 .svelte-kit/
 build/
+
+# Local copies of the VPS files (deploy/vps/bootstrap.sh reads the .example ones)
+deploy/slopswarm.env
+deploy/vps/deploy.conf

@@ -1,5 +1,7 @@
 // `just preflight`: plan §11 checks 1–7, 8 (pi + OpenRouter), 9 (web search relay) and 10 (web fetch through the relay). Each prints PASS / FAIL / SKIP with a one-line reason.
 // Containers run with the same dockerRunArgs as real wakes; scratch dirs live under data/preflight/.
+import { CODEX_AUTH_PATH } from "./controller/index.ts";
+import { loadHostConfig } from "./hostconfig.ts";
 import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,7 +28,7 @@ interface Result {
 
 const REPO = join(import.meta.dir, "..");
 const FIXTURES = join(REPO, "test", "fixtures");
-const CODEX_AUTH = join(REPO, "secrets", "codex", "auth.json");
+const CODEX_AUTH = CODEX_AUTH_PATH;
 const CONTAINER_TIMEOUT_MS = 5 * 60_000;
 
 interface RunOutput {
@@ -48,6 +50,9 @@ class Preflight {
   /** Outputs shared between checks (1–3 feed 5–7). */
   claudeHi?: CliRun;
   codexHi?: CliRun;
+
+  /** Allowlist and container limits (config/host.yaml): preflight runs its containers on this machine directly. */
+  readonly host = loadHostConfig();
 
   constructor(readonly cfg: SwarmConfig) {
     mkdirSync(this.root, { recursive: true });
@@ -81,10 +86,10 @@ class Preflight {
       env,
       passEnv,
       argv,
-      network: this.cfg.network.name,
-      proxy: this.cfg.network.proxy,
+      network: this.host.network.name,
+      proxy: this.host.network.proxy,
       noProxy,
-      limits: this.cfg.controller.container,
+      limits: this.host.container,
     });
     const p = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", stdin: "ignore", env: dockerProcessEnv({ passEnv }) });
     let timedOut = false;
@@ -284,7 +289,7 @@ async function check3(pf: Preflight): Promise<Result> {
   if (!http("anthropic")) problems.push(`api.anthropic.com not reachable via proxy (${line("anthropic")})`);
   if (!http("chatgpt")) problems.push(`chatgpt.com not reachable via proxy (${line("chatgpt")})`);
   if (/rc=0/.test(line("direct"))) problems.push("direct egress without proxy works");
-  const wantsOpenRouter = pf.cfg.network.allowlist.some((d) => d.trim().toLowerCase().replace(/^\*?\./, "") === OPENROUTER_DOMAIN);
+  const wantsOpenRouter = pf.host.network.allowlist.some((d) => d.trim().toLowerCase().replace(/^\*?\./, "") === OPENROUTER_DOMAIN);
   if (wantsOpenRouter && !http("openrouter")) problems.push(`openrouter.ai not reachable via proxy (${line("openrouter")})`);
   if (problems.length) return fail(problems.join("; "));
   const notes = ["example.com blocked, model APIs reachable only via proxy"];
@@ -478,7 +483,7 @@ async function check9(pf: Preflight): Promise<Result> {
   const runId = `preflight-${process.pid}`;
   const dirs = searchDirs(join(pf.root, "search"));
   try {
-    await startSearch({ runId, network: pf.cfg.network.name, dir: dirs.base });
+    await startSearch({ runId, network: pf.host.network.name, dir: dirs.base });
     const runtime = pf.agentDirs("searcher").runtime;
     issueSearchToken(dirs, runtime, "searcher", 1);
     const script =
@@ -526,7 +531,7 @@ async function check10(pf: Preflight): Promise<Result> {
     ["file", "file:///etc/passwd"],
   ];
   try {
-    await startSearch({ runId, network: pf.cfg.network.name, dir: dirs.base, webfetch: limits });
+    await startSearch({ runId, network: pf.host.network.name, dir: dirs.base, webfetch: limits });
     const runtime = pf.agentDirs("fetcher").runtime;
     issueSearchToken(dirs, runtime, "fetcher", 1, { search: false });
     const script = [
@@ -578,7 +583,7 @@ export async function runPreflight(opts: { swarmPath: string; only?: number[] })
     return false;
   }
   console.log(`image ${AGENT_IMAGE} (claude ${img.claude ?? "?"}, codex ${img.codex ?? "?"}, pi ${img.pi ?? "?"})`);
-  await ensureProxy(cfg.network.allowlist);
+  await ensureProxy(loadHostConfig().network.allowlist);
   const pf = new Preflight(cfg);
   let ok = true;
   for (const [n, title, fn] of selected) {
