@@ -4,7 +4,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { HOST_SNAPSHOT_KEY, loadSwarm, swarmFromSnapshot } from "../src/config.ts";
+import { browsercheckEnv } from "../src/browsercheck.ts";
+import { HOST_SNAPSHOT_KEY, loadSwarm, parseSwarm, swarmFromSnapshot } from "../src/config.ts";
 import {
   activateSeed,
   activeSeed,
@@ -65,6 +66,21 @@ describe("config in the DB", () => {
     expect(() => deleteSeed(db, "shock")).toThrow(/preset\(s\) shock/);
     expect(() => deleteSeed(db, "default")).toThrow(/can't be deleted/);
     expect(() => deleteSeed(db, "ghost")).toThrow(/not found/);
+  });
+
+  test("browsercheck: a 120 s default, bounded, under the per-wake timeout; its env, and Claude's shell timeout above it", () => {
+    const smoke = readFileSync("config/smoke.yaml", "utf8");
+    const parse = (yaml: string) => parseSwarm(Bun.YAML.parse(yaml), (n) => Bun.YAML.parse(readFileSync(`config/agents/${n}.yaml`, "utf8")));
+    expect(parse(smoke).browsercheck).toEqual({ timeoutMs: 120_000 });
+    expect(parse(smoke + "browsercheck: { timeout_s: 300 }\n").browsercheck).toEqual({ timeoutMs: 300_000 });
+    expect(() => parse(smoke + "browsercheck: { timeout_s: 5 }\n")).toThrow(/browsercheck.timeout_s/);
+    expect(() => parse(smoke + "browsercheck: { timeout_s: 601 }\n")).toThrow(/10–600/);
+    expect(() => parse(smoke + "browsercheck: { timeout_s: 90.5 }\n")).toThrow(/integer/);
+    expect(() => parse(smoke.replace("timeout_min: 15", "timeout_min: 2") + "browsercheck: { timeout_s: 120 }\n")).toThrow(/shorter than budgets.per_wake/);
+    expect(loadSwarm("config/shock.yaml").browsercheck.timeoutMs).toBe(120_000);
+    expect(browsercheckEnv({ timeoutMs: 120_000 }, "claude")).toEqual({ BROWSERCHECK_TIMEOUT_S: "120", BASH_DEFAULT_TIMEOUT_MS: "150000" });
+    expect(browsercheckEnv({ timeoutMs: 60_000 }, "claude")).toEqual({ BROWSERCHECK_TIMEOUT_S: "60" });
+    expect(browsercheckEnv({ timeoutMs: 300_000 }, "codex")).toEqual({ BROWSERCHECK_TIMEOUT_S: "300" });
   });
 
   test("seeds are versioned per name; a known text re-activates its version; one active version per name", () => {

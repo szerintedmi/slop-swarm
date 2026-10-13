@@ -107,7 +107,7 @@ Live pages refresh their SvelteKit data every five seconds. Refresh pauses while
 ## Pointers
 
 - Original plan and rationale (no longer maintained): [docs/plans/2026-10-10-tiny-society-token-probe.md](docs/plans/2026-10-10-tiny-society-token-probe.md). Open plans: `docs/plans/`; finished ones: `docs/plans/_archive/`
-- Config: `config/smoke.yaml`, `config/swarm.yaml` (the 1-hour run), agents in `config/agents/`, prices in `config/pricing.yaml` (each agent's `/self/pricing.yaml` holds only its own models: configured plus any it was billed for), seeds in `config/seeds/<name>.md` (`default.md`, and `shock.md` for `config/shock.yaml`: the same fleet, told to build software that runs in a browser)
+- Config: `config/smoke.yaml`, `config/swarm.yaml` (the 1-hour run), agents in `config/agents/`, prices in `config/pricing.yaml` (each agent's `/self/pricing.yaml` holds only its own models: configured plus any it was billed for), seeds in `config/seeds/<name>.md` (`default.md`, and `shock.md` for `config/shock.yaml`: the same fleet, told to build software that runs in a browser, tested with the image's `browsercheck`, headless Chromium, whose time limit is the config's `browsercheck.timeout_s`, default 120 s)
 - Data (gitignored): `data/swarm.db`, `data/worlds/<world>/` (forge, home backups, relay logs, forge logins), `data/runs/<run>/` (transcripts), `data/runner/` (the local runner: agents' live dirs), `data/logs/`, or wherever `SLOPSWARM_DATA_DIR` points
 - Hosted setup: [docs/deploy.md](docs/deploy.md) (VPS, tailnet, CI deploys, backups, Forgejo upgrades, the public forge)
 - Findings: `docs/findings/`

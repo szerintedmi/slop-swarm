@@ -5,6 +5,9 @@ ARG CLAUDE_CODE_VERSION=2.1.296
 ARG CODEX_VERSION=0.162.1
 # pi (OpenRouter agents); needs Node >= 22.19, which node:22 has.
 ARG PI_VERSION=1.1.0
+# browsercheck (docker/browsercheck.mjs): headless Chromium (Debian's) driven by puppeteer-core, for agents testing
+# what they build for the browser.
+ARG PUPPETEER_CORE_VERSION=25.11.0
 # Gitea's CLI, for the run's forge (plan §4.5). Checksums of the release's .xz assets.
 ARG TEA_VERSION=0.16.0
 ARG TEA_SHA256_ARM64=7ebeb8783ac0d69a1cac545e5a0d8f0c7dd7d6e943e73b32dfc051ef7686a60b
@@ -17,6 +20,7 @@ ARG TARGETARCH
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git python3 curl ca-certificates jq ripgrep procps xz-utils poppler-utils \
+    chromium fonts-liberation fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 
 RUN case "${TARGETARCH}" in arm64) sum="${TEA_SHA256_ARM64}" ;; amd64) sum="${TEA_SHA256_AMD64}" ;; *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; esac \
@@ -35,6 +39,14 @@ RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/c
 # Web search and web fetch through the run's relay (src/search.ts, src/webfetch.ts), for any harness.
 COPY --chmod=0755 websearch webfetch /usr/local/bin/
 
+# browsercheck: its own dir so the script resolves puppeteer-core next to it.
+COPY --chmod=0755 browsercheck.mjs /opt/browsercheck/browsercheck.mjs
+RUN cd /opt/browsercheck \
+ && npm init -y >/dev/null && npm pkg set type=module \
+ && npm install --omit=dev "puppeteer-core@${PUPPETEER_CORE_VERSION}" \
+ && npm cache clean --force \
+ && ln -s /opt/browsercheck/browsercheck.mjs /usr/local/bin/browsercheck
+
 # node:22 ships a `node` user with uid 1000; rename it to `agent` so files on the bind mounts line up.
 RUN usermod -l agent -d /home/agent -m node && groupmod -n agent node
 
@@ -42,7 +54,8 @@ LABEL org.slopswarm.claude-code="${CLAUDE_CODE_VERSION}" \
       org.slopswarm.codex="${CODEX_VERSION}" \
       org.slopswarm.pi="${PI_VERSION}" \
       org.slopswarm.tea="${TEA_VERSION}" \
-      org.slopswarm.gh="${GH_VERSION}"
+      org.slopswarm.gh="${GH_VERSION}" \
+      org.slopswarm.puppeteer-core="${PUPPETEER_CORE_VERSION}"
 
 # The root filesystem is mounted read-only at runtime; everything writable lives in /tmp (tmpfs)
 # or the bind mounts (/home/agent, /runtime).

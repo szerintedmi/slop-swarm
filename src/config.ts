@@ -45,11 +45,21 @@ export interface SwarmConfig {
   github?: { org: string; user: string };
   /** Agents' `webfetch <url>`: GET-only downloads of public URLs through the run's relay (src/webfetch.ts). Absent = off. */
   webfetch?: WebfetchConfig;
+  /** The image's `browsercheck` (src/browsercheck.ts): always there; the config sets its time limit. */
+  browsercheck: BrowsercheckConfig;
   /** Absolute path of the config file and the seed/pricing files next to it. */
   paths: { swarm: string; seed: string; pricing: string; configDir: string };
   /** Raw YAML text of swarm + agents, snapshotted into the runs table. */
   snapshot: string;
 }
+
+export interface BrowsercheckConfig {
+  /** One browsercheck run gives up after this long (default and the most `--timeout` may ask for). */
+  timeoutMs: number;
+}
+
+/** Bounds for `browsercheck.timeout_s`. */
+export const BROWSERCHECK_TIMEOUT_S = { default: 120, min: 10, max: 600 } as const;
 
 export interface WebfetchConfig {
   maxBytes: number;
@@ -203,9 +213,13 @@ export function parseSwarm(
     },
   };
   if (cfg.scheduler.maxSleepMs > cfg.run.maxDurationMs) throw new ConfigError("scheduler: max_sleep_min longer than run.max_duration_min");
+  const browsercheck = parseBrowsercheck(s.browsercheck);
+  // Checked when set: an unset limit with a short per-wake timeout is bounded by the wake anyway.
+  if (s.browsercheck !== undefined && browsercheck.timeoutMs >= cfg.budgets.perWake.timeoutMs) throw new ConfigError("browsercheck.timeout_s: must be shorter than budgets.per_wake.timeout_min");
   // The allowlist the agents need (openrouter.ai, GitHub's domains) is checked against config/host.yaml at launch (hostconfig.ts checkHostFor).
   return {
     ...cfg,
+    browsercheck,
     ...(s.github !== undefined ? { github: parseGithub(s.github) } : {}),
     ...(s.webfetch !== undefined && s.webfetch !== false ? { webfetch: parseWebfetch(s.webfetch) } : {}),
   };
@@ -213,6 +227,14 @@ export function parseSwarm(
 
 /** Upper bounds keep one fetch from tying up the relay (256 MB memory, one deadline per fetch). */
 export const WEBFETCH_MAX = { mb: 100, timeoutS: 120, redirects: 10 } as const;
+
+/** `browsercheck:` (optional; `timeout_s` defaults to 120). */
+function parseBrowsercheck(raw: unknown): BrowsercheckConfig {
+  const b = obj(raw ?? {}, "browsercheck");
+  const t = num(b.timeout_s ?? BROWSERCHECK_TIMEOUT_S.default, "browsercheck.timeout_s", { min: BROWSERCHECK_TIMEOUT_S.min });
+  if (t > BROWSERCHECK_TIMEOUT_S.max || !Number.isInteger(t)) throw new ConfigError(`browsercheck.timeout_s: expected an integer ${BROWSERCHECK_TIMEOUT_S.min}–${BROWSERCHECK_TIMEOUT_S.max}`);
+  return { timeoutMs: t * S };
+}
 
 /** `webfetch:` (an empty section takes the defaults; remove it or set `false` to turn webfetch off). */
 function parseWebfetch(raw: unknown): WebfetchConfig {
