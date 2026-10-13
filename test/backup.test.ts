@@ -72,5 +72,5 @@ describe("backups", () => {
     expect(list.forges[w]).toHaveLength(1);
     expect(list.disk.totalBytes).toBeGreaterThan(0);
     await service.close();
-  });
+  }, 30_000); // service.start() builds the dashboard when no build matches the sources (a cold checkout): seconds, not ms
 });
