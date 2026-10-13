@@ -24,21 +24,23 @@
 //   GET    /api/v1/worlds/:id/agents/:name/file?path=  one home file
 //   GET    /api/v1/presets | agents                 config rows
 //   GET|PUT|DELETE /api/v1/presets/:name | agents/:name   {yaml} validated on save
-//   GET    /api/v1/seeds                            versions (without text); /seeds/:id with text
-//   POST   /api/v1/seeds                            {text, note?}: a new active version
-//   POST   /api/v1/seeds/:id/activate
+//   GET    /api/v1/seeds[?name=]                    every seed's versions (without text); /seeds/:id with text
+//   POST   /api/v1/seeds                            {name?, text, note?}: a new active version of that seed (default: `default`)
+//   POST   /api/v1/seeds/:id/activate               the active version of its seed
+//   DELETE /api/v1/seeds/:name                      a seed with all its versions (not `default`, not one a preset names)
 //   GET    /api/v1/config                           the whole config as a bundle; POST imports one
 //   POST   /api/v1/worlds/:id/forge-image           {image}: a new Forgejo image for an idle world (runs its migrations)
 //   GET    /api/v1/backups                          backups and disk use; POST {db?, worlds?} backs up now
 import type { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { diskUse, listBackups } from "./backup.ts";
-import { ConfigError } from "./config.ts";
+import { ConfigError, DEFAULT_SEED } from "./config.ts";
 import {
   activateSeed,
   configBundle,
   deleteAgentProfile,
   deletePreset,
+  deleteSeed,
   getAgentProfile,
   getPreset,
   importBundle,
@@ -325,20 +327,25 @@ export function createApi(o: ApiOptions): (req: Request) => Promise<Response | n
         return json({ ok: true });
       }
     }
-    if (is("GET", "seeds")) return json(listSeeds(db).map(seedMeta));
+    if (is("GET", "seeds")) return json(listSeeds(db, url.searchParams.get("name") ?? undefined).map(seedMeta));
     if (is("GET", "seeds", null)) {
       const s = listSeeds(db).find((x) => x.id === Number(p[1]));
       return s ? json(s) : json({ error: "not found" }, 404);
     }
     if (is("POST", "seeds")) {
       writable();
-      const b = await body<{ text?: unknown; note?: unknown }>(req);
-      if (typeof b?.text !== "string") throw new ApiError(400, "expected {text, note?}");
-      return json(seedMeta(saveSeed(db, b.text, typeof b.note === "string" ? b.note : null)));
+      const b = await body<{ name?: unknown; text?: unknown; note?: unknown }>(req);
+      if (typeof b?.text !== "string" || (b.name !== undefined && typeof b.name !== "string")) throw new ApiError(400, "expected {name?, text, note?}");
+      return json(seedMeta(saveSeed(db, b.name ?? DEFAULT_SEED, b.text, typeof b.note === "string" ? b.note : null)));
     }
     if (is("POST", "seeds", null, "activate")) {
       writable();
       return json(seedMeta(activateSeed(db, Number(p[1]))));
+    }
+    if (is("DELETE", "seeds", null)) {
+      writable();
+      deleteSeed(db, p[1]!);
+      return json({ ok: true });
     }
     if (is("GET", "config")) return json(configBundle(db));
     if (is("POST", "config")) {

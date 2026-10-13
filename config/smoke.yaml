@@ -5,6 +5,7 @@ run:
   world_end_grace_s: 60     # a wake still running at the world end is stopped this long after it
 
 agents: [bramble, sorrel, wren, fern]   # -> config/agents/<name>.yaml
+seed: default                            # -> config/seeds/<name>.md
 
 budgets:
   swarm_usd: 10

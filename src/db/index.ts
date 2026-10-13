@@ -45,6 +45,9 @@ function migrate(db: Database): void {
   if (!has("requests", "vendor_provider")) db.exec("ALTER TABLE requests ADD COLUMN vendor_provider TEXT");
   for (const col of ["world_id", "brief", "host_hash"]) if (!has("runs", col)) db.exec(`ALTER TABLE runs ADD COLUMN ${col} TEXT`);
   if (!has("worlds", "forge_port")) db.exec("ALTER TABLE worlds ADD COLUMN forge_port INTEGER");
+  // Named seeds: every version before them is the `default` seed (the column's default), and its active one stays active.
+  if (!has("seeds", "name")) db.exec("ALTER TABLE seeds ADD COLUMN name TEXT NOT NULL DEFAULT 'default'");
+  db.exec("CREATE INDEX IF NOT EXISTS seeds_name ON seeds (name, active)");
   // Launch controls have no run yet: controls.run_id became nullable (SQLite can't drop NOT NULL in place).
   const runIdCol = db.query<{ name: string; notnull: number }, []>("PRAGMA table_info(controls)").all().find((c) => c.name === "run_id");
   if (runIdCol?.notnull) {

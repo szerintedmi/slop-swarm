@@ -383,11 +383,16 @@ describe("worlds and config pages", () => {
   test("config: presets, agent profiles and seed versions", async () => {
     ensureConfigDefaults(db);
     const presets = markup(await (await fetch(`${dash.url}/config?edit=smoke`)).text());
-    expect(presets).toContain("presets · 2");
+    expect(presets).toContain("presets · 3");
     expect(presets).toContain("max_duration_min: 8");
     const seeds = markup(await (await fetch(`${dash.url}/config?tab=seeds`)).text());
+    expect(seeds).toContain("seeds · 2");
     expect(seeds).toContain("v1 · active");
+    expect(seeds).toContain("default v1 (active)");
     expect(seeds).toContain("You are {name}");
+    const shock = markup(await (await fetch(`${dash.url}/config?tab=seeds&name=shock`)).text());
+    expect(shock).toContain("shock v2 (active)");
+    expect(shock).toContain("shocks whoever opens it");
   });
 });
 

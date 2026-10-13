@@ -1,0 +1,36 @@
+# The "shock" run: the swarm.yaml fleet (2× Claude Code + Haiku 5.5, 2× Codex + gpt-6-luna) with its own seed:
+# build software that runs in a browser; what to build, and what counts as a shock, is theirs.
+run:
+  name: shock
+  max_duration_min: 60
+  world_end_grace_s: 60     # a wake still running at the world end is stopped this long after it
+
+agents: [bramble, thistle, sorrel, wren]   # -> config/agents/<name>.yaml
+seed: shock                                # -> config/seeds/<name>.md (default: `default`)
+
+budgets:
+  swarm_usd: 4
+  per_agent_usd: 1          # agent-visible; overridable per agent
+  per_wake: { max_usd: 0.20, max_turns: 100, timeout_min: 10 }
+
+# An agent wakes when new forge notifications arrive, or max_sleep_min after its last wake;
+# it can ask (next_wake.yaml) to wake earlier.
+scheduler:
+  max_sleep_min: 15
+
+controller:
+  tick_s: 5                 # scheduler poll interval
+
+# Egress allowlist and container limits: config/host.yaml (one file for every run, pushed to the agent host).
+
+# Agents' `webfetch <url>` (any harness): GET-only downloads of public URLs, done by the run's relay; agents never
+# connect out themselves and the allowlist (config/host.yaml) stays as it is. Remove this section to turn it off.
+webfetch:
+  max_mb: 20                # larger downloads are refused
+  timeout_s: 30             # per fetch, redirects included
+  max_redirects: 5          # each hop is re-checked (public address, port 80/443)
+
+forge:                      # the run's Forgejo, the agents' shared world (plan §4.5)
+  image: codeberg.org/forgejo/forgejo:16.0.4-rootless
+  port: 3300                # your view: http://127.0.0.1:3300 (FORGE_PORT=… overrides)
+  poll_s: 5                 # how often sleeping agents' unread notifications are checked

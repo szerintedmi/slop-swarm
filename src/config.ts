@@ -25,6 +25,8 @@ export interface SwarmConfig {
   /** `worldEndGraceMs`: how long a wake still running at the world end may go on before it is stopped. */
   run: { name: string; maxDurationMs: number; worldEndGraceMs: number };
   agents: AgentConfig[];
+  /** The seed the agents run with, by name (`config/seeds/<name>.md`, a named seed in the DB); default `default`. */
+  seed: string;
   budgets: {
     swarmUsd: number;
     perAgentUsd: number;
@@ -56,6 +58,11 @@ export interface WebfetchConfig {
 }
 
 export class ConfigError extends Error {}
+
+/** The seed a preset uses when it names none. */
+export const DEFAULT_SEED = "default";
+/** Seed and preset names: a file name under config/, a DB key, part of a URL. */
+export const SEED_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,40}$/;
 
 function obj(v: unknown, field: string): Record<string, unknown> {
   if (!v || typeof v !== "object" || Array.isArray(v)) throw new ConfigError(`${field}: expected a mapping`);
@@ -162,6 +169,8 @@ export function parseSwarm(
   });
   const dup = agents.find((a, i) => agents.findIndex((b) => b.name === a.name) !== i);
   if (dup) throw new ConfigError(`agents: duplicate agent ${dup.name}`);
+  const seed = str(s.seed ?? DEFAULT_SEED, "seed");
+  if (!SEED_NAME_RE.test(seed)) throw new ConfigError(`seed: must match ${SEED_NAME_RE}`);
 
   const cfg = {
     run: {
@@ -170,6 +179,7 @@ export function parseSwarm(
       worldEndGraceMs: num(run.world_end_grace_s ?? 60, "run.world_end_grace_s") * S,
     },
     agents,
+    seed,
     budgets: {
       swarmUsd: num(budgets.swarm_usd, "budgets.swarm_usd"),
       perAgentUsd,
@@ -274,7 +284,7 @@ export function loadSwarm(swarmPath: string): SwarmConfig {
     agentTexts.push(`# --- agents/${name}.yaml\n${text}`);
     return Bun.YAML.parse(text);
   });
-  const paths = { swarm: abs, seed: join(configDir, "seed.md"), pricing: join(configDir, "pricing.yaml"), configDir };
+  const paths = { swarm: abs, seed: join(configDir, "seeds", `${parsed.seed}.md`), pricing: join(configDir, "pricing.yaml"), configDir };
   for (const p of [paths.seed, paths.pricing]) if (!existsSync(p)) throw new ConfigError(`missing ${p}`);
   return { ...parsed, paths, snapshot: [`# --- ${swarmPath}`, swarmText, ...agentTexts].join("\n") };
 }

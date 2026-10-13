@@ -8,6 +8,7 @@ import { homeFile, homeTree } from './homes.ts';
 import { diskUse } from '../backup.ts';
 import { listWorlds } from '../controller/worlds.ts';
 import { listAgentProfiles, listPresets, listSeeds } from '../config-db.ts';
+import { DEFAULT_SEED } from '../config.ts';
 import { bytes, isMarkdown } from './format.ts';
 import { readFetchLog } from '../webfetch.ts';
 
@@ -151,13 +152,17 @@ export function createDashboardService(opts: DashboardOptions) {
       const t = url.searchParams.get('tab');
       const tab = t === 'agents' || t === 'seeds' ? t : 'presets';
       const edit = url.searchParams.get('edit');
+      // Seeds: ?seed=<version id>, or ?name=<seed> (its active version; `+` is the new-seed form), else the default seed.
       const seedId = Number(url.searchParams.get('seed') ?? 0);
+      const seedName = url.searchParams.get('name');
       const seeds = listSeeds(db);
-      const seed = seeds.find(x => x.id === seedId) ?? seeds.find(x => x.active) ?? null;
+      const seed = seeds.find(x => x.id === seedId)
+        ?? (seedName ? seeds.find(x => x.name === seedName && x.active) : undefined)
+        ?? seeds.find(x => x.name === DEFAULT_SEED && x.active) ?? seeds.find(x => x.active) ?? null;
       return {
         kind: 'config' as const, tab, edit,
         presets: listPresets(db), agents: listAgentProfiles(db),
-        seeds: seeds.map(({ text: _t, ...x }) => x), seed,
+        seeds: seeds.map(({ text: _t, ...x }) => x), seed, newSeed: seedName === '+',
         readonly: !canWrite, live: false,
       };
     }

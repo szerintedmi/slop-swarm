@@ -24,7 +24,7 @@ up *args:
 continue world *args:
     {{cli}} continue {{world}} {{args}}
 
-# config in the DB: list (presets, agent profiles, active seed), seeds (versions), import / export [dir] (default config/); --json
+# config in the DB: list (presets, agent profiles, each seed's active version), seeds (every version), import / export [dir] (default config/); --json
 config *args:
     {{cli}} config {{args}}
 

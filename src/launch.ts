@@ -40,7 +40,7 @@ export function resolveSwarm(db: Database, arg: string): { cfg: SwarmConfig; see
   }
   ensureConfigDefaults(db);
   const { cfg, seed } = swarmFromPreset(db, arg, { hostYaml: hostText });
-  return { cfg, seedText: seed.text, source: `preset ${arg}, seed v${seed.id}` };
+  return { cfg, seedText: seed.text, source: `preset ${arg}, seed ${seed.name} v${seed.id}` };
 }
 
 /** The agent image the runner runs: a registry reference (CI pushes it by digest) or this checkout's local tag. */

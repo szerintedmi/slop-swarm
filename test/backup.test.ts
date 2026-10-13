@@ -22,7 +22,7 @@ describe("backups", () => {
     for (let i = 0; i < 4; i++) files.push(backupDb(db, { keep: 2, now: Date.UTC(2026, 9, 13, i) }));
     expect(listBackups().db).toEqual(files.slice(2).map((f) => f.split("/").at(-1)!));
     const copy = openDb(files.at(-1)!, { readonly: true });
-    expect(copy.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM swarm_presets").get()!.n).toBe(2);
+    expect(copy.query<{ n: number }, []>("SELECT COUNT(*) AS n FROM swarm_presets").get()!.n).toBe(3);
   });
 
   test("a forge as plain files; the last backup time is read back from its name", () => {

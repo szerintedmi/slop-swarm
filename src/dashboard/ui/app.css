@@ -87,6 +87,7 @@ button:hover{border-color:var(--accent)}button.danger{border-color:var(--bad);co
 .tree li > a::before,.tree li.x::before{content:"";width:1em;flex:none}
 .tree .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .tree li.x .nm{color:var(--muted)}
+.tree li.group{padding:6px 6px 0;color:var(--muted);font-weight:700}.tree li.group + li.v{margin-top:2px}.tree li.v > a{padding-left:20px}
 .tree .meta{color:var(--muted);white-space:nowrap;font-size:11px;font-family:ui-sans-serif,system-ui,sans-serif}
 @media (max-width:760px){.split{grid-template-columns:1fr}.split > .viewer{order:-1}.feed > li{grid-template-columns:56px 1fr}}
 .ro{font-size:12px;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:0 8px}
