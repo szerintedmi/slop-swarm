@@ -2,7 +2,8 @@
 # Deploy on the VPS (docs/plans/2026-10-12-hosted-control-plane.md §6.4-6.5; docs/deploy.md). Installed as
 # /usr/local/bin/slopswarm-deploy and run as root through a forced SSH command (the CI's key):
 #   command="sudo /usr/local/bin/slopswarm-deploy",no-pty,no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 …
-# SSH_ORIGINAL_COMMAND: deploy <controller image@digest> [<agent image@digest>]
+# SSH_ORIGINAL_COMMAND: deploy <controller image@digest> [<agent image@digest>] (sudoers keeps it: env_keep in
+# /etc/sudoers.d/slopswarm-deploy, written by bootstrap.sh; without it the argument line is lost and this fails with usage).
 # Also by hand, for a rollback: sudo slopswarm-deploy deploy <previous controller@digest> [<agent@digest>]
 #
 # Deploys don't kill wakes: the controller gets SIGTERM, detaches (the run keeps going on the agent host), and the
