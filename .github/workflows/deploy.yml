@@ -29,6 +29,8 @@ jobs:
         with:
           bun-version: 1.4.3
       - run: bun install --frozen-lockfile
+      # A cold checkout has no dashboard build; the first service test would otherwise build it inside its timeout.
+      - run: bun src/cli.ts ui-build
       - run: bun test
       - run: bun run typecheck
 
