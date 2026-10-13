@@ -183,7 +183,9 @@ put "$tmp" /home/deploy/.ssh/authorized_keys 0600 deploy:deploy || true
 rm -f "$tmp"
 put "$HERE/../slopswarm-deploy" /usr/local/bin/slopswarm-deploy 0755 || true
 tmp=$(mktemp)
-echo 'deploy ALL=(root) NOPASSWD: /usr/local/bin/slopswarm-deploy' >"$tmp"
+# sudo resets the environment; keep SSH_ORIGINAL_COMMAND (the deploy's argument line) for this one command.
+printf '%s\n' 'Defaults!/usr/local/bin/slopswarm-deploy env_keep += "SSH_ORIGINAL_COMMAND"' \
+  'deploy ALL=(root) NOPASSWD: /usr/local/bin/slopswarm-deploy' >"$tmp"
 visudo -cqf "$tmp" || die "sudoers rule failed validation"
 put "$tmp" /etc/sudoers.d/slopswarm-deploy 0440 || true
 rm -f "$tmp"
