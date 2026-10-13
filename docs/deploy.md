@@ -132,7 +132,7 @@ forced command. Secrets: see the workflow header.
 
 What a deploy does ([deploy/slopswarm-deploy](../deploy/slopswarm-deploy)): one at a time (lock); pulls; if the DB
 schema changed (`org.slopswarm.schema`), waits until no run is active (6 h at most); copies `compose.yaml` and the
-`Caddyfile` out of the image; `docker compose up -d`; health-checks the API; rolls back to the previous digests if the
+`Caddyfile` out of the image; `docker compose up -d` (and restarts Caddy when the Caddyfile changed); health-checks the API; rolls back to the previous digests if the
 new controller doesn't come up.
 
 Deploys don't kill wakes: the old controller gets SIGTERM and detaches (the run stays running, its containers keep

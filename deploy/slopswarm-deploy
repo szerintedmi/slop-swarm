@@ -68,6 +68,10 @@ cid=$(docker create "$CONTROLLER")
 trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 docker cp "$cid:/app/deploy/compose.yaml" "$DIR/compose.yaml.new"
 docker cp "$cid:/app/deploy/Caddyfile" "$DIR/Caddyfile.new"
+# A changed Caddyfile needs a Caddy restart: compose doesn't recreate it for a file's contents, and the single-file
+# bind mount keeps the old inode after the mv.
+CADDY_CHANGED=1
+cmp -s "$DIR/Caddyfile.new" "$DIR/Caddyfile" 2>/dev/null && CADDY_CHANGED=""
 mv "$DIR/compose.yaml.new" "$DIR/compose.yaml"
 mv "$DIR/Caddyfile.new" "$DIR/Caddyfile"
 
@@ -83,6 +87,10 @@ up() {
   grep -Eq '^PUBLIC_FORGE_DOMAIN=.+' "$ENV_FILE" && profile="--profile public"
   # shellcheck disable=SC2086
   docker compose -f "$DIR/compose.yaml" --env-file "$DIR/image.env" $profile up -d --remove-orphans
+  if [ -n "$profile" ] && [ -n "$CADDY_CHANGED" ]; then
+    docker restart slopswarm-caddy >/dev/null
+    CADDY_CHANGED=""
+  fi
 }
 healthy() {
   i=0
