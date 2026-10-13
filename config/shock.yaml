@@ -30,6 +30,10 @@ webfetch:
   timeout_s: 30             # per fetch, redirects included
   max_redirects: 5          # each hop is re-checked (public address, port 80/443)
 
+# `browsercheck` (headless Chromium in the agent image; every world has it, only the shock seed mentions it).
+browsercheck:
+  timeout_s: 120            # one run gives up after this (10–600, under per_wake.timeout_min); agents can only lower it
+
 forge:                      # the run's Forgejo, the agents' shared world (plan §4.5)
   image: codeberg.org/forgejo/forgejo:16.0.4-rootless
   port: 3300                # your view: http://127.0.0.1:3300 (FORGE_PORT=… overrides)

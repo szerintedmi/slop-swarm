@@ -17,6 +17,7 @@ import { PI_AGENT_SUBDIR } from "../harnesses/pi.ts";
 import type { HostFile, WakeStatus } from "../runner/protocol.ts";
 import { newRelayToken, readSearchLog, RELAY_TOKEN_FILE, SEARCH_MODEL, SEARCH_PROMPT_LINE, searchEnv, searchHost, searchRows, usesRelay } from "../search.ts";
 import { webfetchPromptBlock } from "../webfetch.ts";
+import { browsercheckEnv } from "../browsercheck.ts";
 import type { AgentEvent, CostBreakdown, RequestUsage, Harness, HarnessAdapter, WakeExitReason, WakeTrigger } from "../types.ts";
 import { isDepleted, overLimit, wakeLimit, agentRemaining } from "./budget.ts";
 import { mirrorFile, mirrorSessionFiles } from "./host-files.ts";
@@ -354,7 +355,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     });
     return {
       argv,
-      env: { ...adapter.containerEnv(MOUNTS.runtime), ...forgeEnv(world), ...(cfg.github ? githubEnv() : {}), ...(relay ? searchEnv(world) : {}) },
+      env: { ...adapter.containerEnv(MOUNTS.runtime), ...forgeEnv(world), ...(cfg.github ? githubEnv() : {}), ...(relay ? searchEnv(world) : {}), ...browsercheckEnv(cfg.browsercheck, a.harness) },
       secretEnv: Object.keys(secrets),
       noProxy: [forgeHost(world), ...(relay ? [searchHost(world)] : [])],
     };

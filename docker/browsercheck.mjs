@@ -8,6 +8,9 @@ import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import puppeteer from "puppeteer-core";
 
+// The world's limit (the swarm config's browsercheck.timeout_s): the default, and the most --timeout may ask for.
+const LIMIT_S = Number(process.env.BROWSERCHECK_TIMEOUT_S) > 0 ? Number(process.env.BROWSERCHECK_TIMEOUT_S) : 120;
+
 const USAGE = `usage: browsercheck PATH [steps…]
   PATH              an .html file, or a directory with an index.html; opened as file://
 steps, run in order after the page loads (default: --wait 2000 --shot /tmp/browsercheck.png):
@@ -21,7 +24,10 @@ steps, run in order after the page loads (default: --wait 2000 --shot /tmp/brows
   --shot FILE       save a screenshot (PNG); view it with your image/file reading tool
 options:
   --size WxH        viewport (default 1280x800)
-  --timeout S       give up after S seconds (default 60)`;
+  --timeout S       give up sooner than this world's limit of ${LIMIT_S}s (the limit can't be raised)
+The whole run (start, load, every step) stops at the limit. There is no GPU and one CPU: WebGL runs in software, so
+heavy shaders are slow here even when they are fine on a real machine.
+exit: 0 no errors · 1 the page reported errors · 2 usage · 3 time limit reached · 4 the browser failed`;
 
 function die(msg) {
   console.error(msg);
@@ -32,7 +38,7 @@ const args = process.argv.slice(2);
 if (!args.length || args[0] === "-h" || args[0] === "--help") die(USAGE);
 let target = null;
 let size = [1280, 800];
-let timeoutS = 60;
+let timeoutS = LIMIT_S;
 const steps = [];
 const pair = (v, n, flag) => {
   const xs = String(v ?? "").split(",").map(Number);
@@ -46,7 +52,11 @@ for (let i = 0; i < args.length; i++) {
     const m = /^(\d+)x(\d+)$/.exec(val());
     if (!m) die("--size: expected WxH");
     size = [Number(m[1]), Number(m[2])];
-  } else if (a === "--timeout") timeoutS = Number(val()) || die("--timeout: expected seconds");
+  } else if (a === "--timeout") {
+    timeoutS = Number(val());
+    if (!(timeoutS > 0)) die("--timeout: expected seconds");
+    if (timeoutS > LIMIT_S) die(`--timeout: at most ${LIMIT_S}s in this world (the operator's limit)`);
+  }
   else if (a === "--wait") steps.push(["wait", Number(val())]);
   else if (a === "--click") steps.push(["click", pair(val(), 2, a)]);
   else if (a === "--move") steps.push(["move", pair(val(), 2, a)]);
@@ -69,29 +79,56 @@ const t0 = Date.now();
 const stamp = () => `${((Date.now() - t0) / 1000).toFixed(1)}s`;
 const log = (kind, text) => console.log(`[${stamp()}] ${kind} ${text}`);
 let errors = 0;
+/** What is running now, for the timeout and failure messages. */
+let doing = "starting Chromium";
+let browser = null;
 const watchdog = setTimeout(() => {
-  log("TIMEOUT", `gave up after ${timeoutS}s`);
-  process.exit(1);
+  log(
+    "TIMEOUT",
+    `stopped at the ${timeoutS}s limit while ${doing}. Everything above happened before that. Likely causes: the page ` +
+      `blocks its main thread (a long loop or a busy requestAnimationFrame), or it is too heavy for software WebGL on one ` +
+      `CPU; fewer or shorter steps, a smaller --size, or lighter rendering help.`,
+  );
+  try {
+    browser?.process()?.kill("SIGKILL");
+  } catch {}
+  process.exit(3);
 }, timeoutS * 1000);
 
-const browser = await puppeteer.launch({
-  executablePath: process.env.BROWSERCHECK_CHROMIUM || "/usr/bin/chromium",
-  headless: true,
-  userDataDir: join(process.env.TMPDIR || "/tmp", `browsercheck-profile-${process.pid}`),
-  args: [
-    // The container is the sandbox (no user namespaces, all capabilities dropped): Chromium's own can't start.
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    // WebGL on the CPU (no GPU in the container).
-    "--use-angle=swiftshader",
-    "--enable-unsafe-swiftshader",
-    "--autoplay-policy=no-user-gesture-required",
-    "--allow-file-access-from-files",
-    "--no-first-run",
-    "--no-default-browser-check",
-    `--crash-dumps-dir=${process.env.TMPDIR || "/tmp"}`,
-  ],
-});
+/** A failure of the browser or a step (not of the page): say which step, and exit 4. */
+function failed(e) {
+  clearTimeout(watchdog);
+  log("FAILED", `${doing}: ${(e?.message || String(e)).split("\n")[0]}`);
+  try {
+    browser?.process()?.kill("SIGKILL");
+  } catch {}
+  process.exit(4);
+}
+process.on("unhandledRejection", failed);
+
+log("start", `${file} (limit ${timeoutS}s)`);
+try {
+  browser = await puppeteer.launch({
+    executablePath: process.env.BROWSERCHECK_CHROMIUM || "/usr/bin/chromium",
+    headless: true,
+    userDataDir: join(process.env.TMPDIR || "/tmp", `browsercheck-profile-${process.pid}`),
+    args: [
+      // The container is the sandbox (no user namespaces, all capabilities dropped): Chromium's own can't start.
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+      // WebGL on the CPU (no GPU in the container).
+      "--use-angle=swiftshader",
+      "--enable-unsafe-swiftshader",
+      "--autoplay-policy=no-user-gesture-required",
+      "--allow-file-access-from-files",
+      "--no-first-run",
+      "--no-default-browser-check",
+      `--crash-dumps-dir=${process.env.TMPDIR || "/tmp"}`,
+    ],
+  });
+} catch (e) {
+  failed(e);
+}
 try {
   const page = await browser.newPage();
   await page.setViewport({ width: size[0], height: size[1] });
@@ -114,8 +151,10 @@ try {
     }
   });
   const url = pathToFileURL(file).href;
+  doing = `loading ${url}`;
   log("open", url);
-  await page.goto(url, { waitUntil: "load", timeout: timeoutS * 1000 });
+  // The watchdog has the time limit; puppeteer's own navigation timeout would fire first with a vaguer message.
+  await page.goto(url, { waitUntil: "load", timeout: 0 });
   const info = await page.evaluate(() => {
     const gl = (() => {
       try {
@@ -135,6 +174,7 @@ try {
   log("loaded", `title=${JSON.stringify(info.title)} canvases=[${info.canvases.join(", ")}] webgl=${info.gl}`);
   if (info.text) log("text", JSON.stringify(info.text));
   for (const [kind, v] of steps) {
+    doing = `step --${kind} ${Array.isArray(v) ? v.join(",") : v}`;
     if (kind === "wait") await new Promise((r) => setTimeout(r, v));
     else if (kind === "click") await page.mouse.click(v[0], v[1]);
     else if (kind === "move") await page.mouse.move(v[0], v[1], { steps: 10 });
@@ -167,8 +207,11 @@ try {
     }
     log(kind, Array.isArray(v) ? v.join(",") : String(v));
   }
+  doing = "closing Chromium";
   log("done", `${errors} error(s)`);
   process.exitCode = errors ? 1 : 0;
+} catch (e) {
+  failed(e);
 } finally {
   clearTimeout(watchdog);
   await browser.close().catch(() => {});
