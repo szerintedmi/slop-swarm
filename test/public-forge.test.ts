@@ -20,7 +20,7 @@ function setup(limits = { perMinute: 3, clonesPerMinute: 1 }) {
     forgePort: (w) => (w === "w-down" ? null : w === "w-active" ? 3302 : 3301),
     now: () => t,
     limits,
-    fetch: async (r) => (seen.push(r), new Response("forge page", { headers: { "set-cookie": "i_like_gitea=1", "content-type": "text/html" } })),
+    fetch: async (r) => (seen.push(r), new Response("forge page", { headers: { "set-cookie": "i_like_gitea=1", "content-type": "text/html", "content-encoding": "zstd" } })),
   });
   const get = (host: string, path = "/", init: RequestInit = {}, peer = "127.0.0.1") => handle(new Request(`http://${host}${path}`, { ...init, headers: { host, ...(init.headers as Record<string, string>) } }), peer);
   return { handle, get, seen, tick: (ms: number) => (t += ms) };
@@ -53,13 +53,14 @@ describe("public forge", () => {
 
   test("routing: a world's subdomain reaches its forge only, credentials stripped both ways", async () => {
     const { get, seen } = setup({ perMinute: 100, clonesPerMinute: 10 });
-    const res = await get(`20261013-0000-smoke-a-ab12.${DOMAIN}`, "/explore/repos?q=x", { headers: { authorization: "token abc", cookie: "a=b", "x-real-ip": "203.0.113.9", sudo: "operator" } });
+    const res = await get(`20261013-0000-smoke-a-ab12.${DOMAIN}`, "/explore/repos?q=x", { headers: { authorization: "token abc", cookie: "a=b", "x-real-ip": "203.0.113.9", sudo: "operator", "accept-encoding": "gzip, br, zstd" } });
     expect(res.status).toBe(200);
     expect(res.headers.get("set-cookie")).toBeNull();
+    expect(res.headers.get("content-encoding")).toBeNull();
     expect(res.headers.get("x-robots-tag")).toBe("noindex");
     const r = seen[0]!;
     expect(r.url).toBe("http://127.0.0.1:3301/explore/repos?q=x");
-    for (const h of ["authorization", "cookie", "sudo", "x-real-ip"]) expect(r.headers.get(h)).toBeNull();
+    for (const h of ["authorization", "cookie", "sudo", "x-real-ip", "accept-encoding"]) expect(r.headers.get(h)).toBeNull();
     expect((await get(`w-active.${DOMAIN}`, "/")).status).toBe(200);
     expect(seen[1]!.url).toBe("http://127.0.0.1:3302/");
     for (const host of [`w-archived.${DOMAIN}`, `w-down.${DOMAIN}`, `nope.${DOMAIN}`, `a.b.${DOMAIN}`, "evil.example.org"]) expect((await get(host)).status).toBe(404);

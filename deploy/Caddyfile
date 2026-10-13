@@ -34,6 +34,8 @@
 	request_header -Cookie
 	header -Set-Cookie
 	header X-Robots-Tag "noindex"
+	# The controller's proxy asks the forge for uncompressed bodies; compression happens here.
+	encode zstd gzip
 	# The controller maps the hostname to the world's forge, applies the same rules again and rate-limits per client.
 	reverse_proxy 127.0.0.1:7780 {
 		header_up X-Real-IP {remote_host}
