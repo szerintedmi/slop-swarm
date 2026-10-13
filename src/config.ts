@@ -35,6 +35,8 @@ export interface SwarmConfig {
   scheduler: {
     maxSleepMs: number;
     maxConcurrentWakes: number;
+    /** Agents' first wakes in a run start this far apart, in config order (0 = all at once). */
+    firstWakeStaggerMs: number;
   };
   controller: {
     tickMs: number;
@@ -202,6 +204,7 @@ export function parseSwarm(
     scheduler: {
       maxSleepMs: num(sch.max_sleep_min, "scheduler.max_sleep_min") * MIN,
       maxConcurrentWakes: num(sch.max_concurrent_wakes ?? agents.length, "scheduler.max_concurrent_wakes", { min: 1 }),
+      firstWakeStaggerMs: num(sch.first_wake_stagger_s ?? 0, "scheduler.first_wake_stagger_s") * S,
     },
     controller: {
       tickMs: num(ctl.tick_s ?? 5, "controller.tick_s") * S,
@@ -213,6 +216,8 @@ export function parseSwarm(
     },
   };
   if (cfg.scheduler.maxSleepMs > cfg.run.maxDurationMs) throw new ConfigError("scheduler: max_sleep_min longer than run.max_duration_min");
+  if (cfg.scheduler.firstWakeStaggerMs * Math.max(0, agents.length - 1) >= cfg.run.maxDurationMs)
+    throw new ConfigError("scheduler: first_wake_stagger_s puts the last first wake past run.max_duration_min");
   const browsercheck = parseBrowsercheck(s.browsercheck);
   // Checked when set: an unset limit with a short per-wake timeout is bounded by the wake anyway.
   if (s.browsercheck !== undefined && browsercheck.timeoutMs >= cfg.budgets.perWake.timeoutMs) throw new ConfigError("browsercheck.timeout_s: must be shorter than budgets.per_wake.timeout_min");

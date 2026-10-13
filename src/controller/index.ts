@@ -92,6 +92,7 @@ export class Controller {
       pricingYaml: this.run.pricing_yaml,
       seed: this.run.seed_text,
       runDeadline: this.run.deadline_at,
+      runStartedAt: this.run.started_at,
       swarmBudgetUsd: this.swarmUsd,
       image: this.opts.image,
       host: this.opts.host,

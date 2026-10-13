@@ -340,3 +340,16 @@ describe("controller service", () => {
     expect(getRun(db, r2)!.status).toBe("running"); // nothing drove it; the next service start sorts it out
   });
 });
+
+describe("createRun", () => {
+  test("first wakes start first_wake_stagger_s apart, in config order", () => {
+    const db = openDb(":memory:");
+    const cfg = config();
+    const runId = createRun(db, { ...cfg, scheduler: { ...cfg.scheduler, firstWakeStaggerMs: 150_000 } }, {}, T0);
+    const due = db.query<{ name: string; next_wake_at: number }, [string]>("SELECT name, next_wake_at FROM agents WHERE run_id = ? ORDER BY next_wake_at").all(runId);
+    expect(due).toEqual([
+      { name: "bramble", next_wake_at: T0 },
+      { name: "thistle", next_wake_at: T0 + 150_000 },
+    ]);
+  });
+});

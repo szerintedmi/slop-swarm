@@ -3,14 +3,16 @@ import { readFileSync } from "node:fs";
 import { loadSwarm, parseSwarm, swarmFromSnapshot } from "../src/config.ts";
 import { checkHostFor, hostConfigHash, loadHostConfig, parseHostConfig } from "../src/hostconfig.ts";
 import { isDepleted, overLimit, wakeLimit } from "../src/controller/budget.ts";
+import { activityLines } from "../src/controller/activity.ts";
 import { fillSeed, humanDuration, makeRunId, wakeNote } from "../src/controller/run.ts";
+import { parseActivity } from "../src/forge.ts";
 import { messagePull, parseNextWake, pickDue, planNextWake } from "../src/controller/scheduler.ts";
 import { pricingForModels } from "../src/controller/self-writer.ts";
 import { wakeStopAt } from "../src/controller/wake.ts";
 import { parsePricing } from "../src/pricing/index.ts";
 
 const MIN = 60_000;
-const sched = { maxSleepMs: 15 * MIN, maxConcurrentWakes: 3 };
+const sched = { maxSleepMs: 15 * MIN, maxConcurrentWakes: 3, firstWakeStaggerMs: 0 };
 
 describe("config", () => {
   test("all shipped swarm configs load", () => {
@@ -24,6 +26,8 @@ describe("config", () => {
     expect(smoke.agents.map((a) => a.harness)).toEqual(["claude", "codex", "codex", "pi"]);
     expect(smoke.scheduler.maxConcurrentWakes).toBe(4); // defaults to the number of agents
     expect(smoke.budgets.swarmUsd).toBeGreaterThanOrEqual(smoke.agents.length * smoke.budgets.perAgentUsd);
+    expect(smoke.scheduler.firstWakeStaggerMs).toBe(0); // default: all at once
+    expect(loadSwarm("config/shock.yaml").scheduler.firstWakeStaggerMs).toBe(150_000);
   });
 
   test("snapshot round-trips", () => {
@@ -152,8 +156,8 @@ test("run ids are unique even within the same minute", () => {
 
 describe("prompt + status", () => {
   test("seed placeholders", () => {
-    const seed = fillSeed("You are {name}. Forge {forge_url}. Sleep {max_sleep}.\n", { name: "wren", forgeUrl: "http://f:3000", maxSleepMs: 90 * MIN });
-    expect(seed).toBe("You are wren. Forge http://f:3000. Sleep 1h 30m.\n");
+    const seed = fillSeed("You are {name}. Forge {forge_url}. Sleep {max_sleep}. Note: {activity}.\n", { name: "wren", forgeUrl: "http://f:3000", maxSleepMs: 90 * MIN });
+    expect(seed).toBe("You are wren. Forge http://f:3000. Sleep 1h 30m. Note: what the others did on the forge since your last wake.\n");
     expect(humanDuration(45_000)).toBe("45s");
     expect(humanDuration(60 * MIN)).toBe("1h");
     // The shipped seeds have no placeholder left once filled, and never mention the world end.
@@ -173,25 +177,66 @@ describe("prompt + status", () => {
     }
   });
 
-  test("wake note: when, why, budget and limits; unread only when there is some; no world end", () => {
+  test("wake note: when, why, budget (share, rate, world end) and limits; unread and activity only when asked", () => {
     const base = {
       now: Date.UTC(2026, 9, 10, 12), wakeSeq: 3, trigger: "message", resumed: false, unread: 2,
       budgetUsd: 3, spentUsd: 0.25, wakeLimitUsd: 0.5, maxTurns: 60, stopsAt: Date.UTC(2026, 9, 10, 12, 15),
+      avgWakeUsd: 0.1, worldEndsAt: Date.UTC(2026, 9, 10, 12, 43),
     };
     expect(wakeNote(base)).toBe(
       [
         "[Wake 3 at 2026-10-10T12:00:00Z (UTC): new forge notifications.",
         "Unread forge notifications: 2 (`tea notifications ls --mine`).",
-        "Budget: $2.7500 left of $3.0000.",
-        "This wake is stopped if it spends over $0.5000, makes 60 turns, or is still running at 2026-10-10T12:15:00Z.",
-        "Past wakes' costs: /self/usage.jsonl. Prices: /self/pricing.yaml.]",
+        "Budget: $2.7500 left of $3.0000 (8% used). Your wakes have averaged $0.1000, so that is ~27 more at this rate. The world ends in 43m; budget left then is simply lost.",
+        "Past wakes' costs: /self/usage.jsonl. Prices: /self/pricing.yaml.",
+        "Safety stops for this wake (a runaway guard, not a target): over $0.5000, 60 turns, or still running at 2026-10-10T12:15:00Z.]",
       ].join("\n"),
     );
-    const first = wakeNote({ ...base, wakeSeq: 1, trigger: "initial", unread: 0 });
+    const first = wakeNote({ ...base, wakeSeq: 1, trigger: "initial", unread: 0, spentUsd: 0, avgWakeUsd: undefined });
     expect(first).toStartWith("[Wake 1 at 2026-10-10T12:00:00Z (UTC): your first wake.");
     expect(first).not.toContain("Unread");
-    expect(first).not.toContain("world");
+    expect(first).not.toContain("averaged");
+    expect(first).toContain("(0% used). The world ends in 43m");
+    expect(first).not.toContain("on the forge");
     expect(wakeNote({ ...base, trigger: "self", resumed: true })).toContain(": the time you chose, continuing your previous session.");
+    const act = wakeNote({ ...base, activity: { since: "last_wake", lines: ["@a: 2 commits to a/x", "@b: opened PR a/x#1 \"Merge\""] } });
+    expect(act).toContain('Unread forge notifications: 2 (`tea notifications ls --mine`).\nThe others on the forge since your last wake:\n  @a: 2 commits to a/x\n  @b: opened PR a/x#1 "Merge"\nBudget:');
+    expect(wakeNote({ ...base, activity: { since: "run_start", lines: [] } })).toContain("The others on the forge since the world began: nothing new.\n");
+  });
+
+  test("activityLines: per user, oldest first, commits and comments counted, titles cut", () => {
+    const t = (m: number) => Date.UTC(2026, 9, 10, 12, m);
+    const lines = activityLines({
+      thistle: [
+        { op: "commit_repo", at: t(5), repo: "thistle/murmuration", commits: 2 },
+        { op: "create_pull_request", at: t(4), repo: "bramble/murmur", index: "2", title: "Merge the flocks" },
+        { op: "commit_repo", at: t(3), repo: "thistle/murmuration", commits: 1 },
+        { op: "create_repo", at: t(1), repo: "thistle/murmuration" },
+        { op: "commit_repo", at: t(2), repo: "thistle/murmuration", commits: 0 },
+        { op: "comment_issue", at: t(6), repo: "bramble/murmur", index: "1", title: "ok" },
+        { op: "comment_issue", at: t(7), repo: "bramble/murmur", index: "1", title: "sure" },
+        { op: "star_repo", at: t(8), repo: "bramble/murmur" },
+      ],
+      sorrel: [],
+      wren: [
+        { op: "create_repo", at: t(1), repo: "wren/afterimage", forkOf: "sorrel/afterimage" },
+        { op: "create_issue", at: t(2), repo: "sorrel/afterimage", index: "1", title: "x".repeat(80) },
+        { op: "merge_pull_request", at: t(3), repo: "wren/afterimage", index: "3", title: "Glow" },
+      ],
+    });
+    expect(lines).toEqual([
+      '@thistle: created thistle/murmuration; opened PR bramble/murmur#2 "Merge the flocks"; 3 commits to thistle/murmuration; 2 comments on bramble/murmur#1',
+      `@wren: forked sorrel/afterimage to wren/afterimage; opened issue sorrel/afterimage#1 "${"x".repeat(59)}…"; merged PR wren/afterimage#3 "Glow"`,
+    ]);
+  });
+
+  test("parseActivity: Forgejo feed entries", () => {
+    const base = { created: "2026-10-13T14:12:04Z", act_user: { login: "bob" } };
+    expect(parseActivity({ ...base, op_type: "commit_repo", repo: { full_name: "bob/flock" }, content: JSON.stringify({ Commits: [], Len: 3 }) })).toEqual({ op: "commit_repo", at: Date.parse(base.created), repo: "bob/flock", commits: 3 });
+    expect(parseActivity({ ...base, op_type: "commit_repo", repo: { full_name: "bob/flock" }, content: "" })!.commits).toBe(0);
+    expect(parseActivity({ ...base, op_type: "create_pull_request", repo: { full_name: "alice/flock" }, content: '["2","Add z"]' })).toMatchObject({ index: "2", title: "Add z" });
+    expect(parseActivity({ ...base, op_type: "create_repo", repo: { full_name: "bob/flock", fork: true, parent: { full_name: "alice/flock" } }, content: "" })!.forkOf).toBe("alice/flock");
+    expect(parseActivity({ op_type: "create_repo", repo: { full_name: "x/y" } })).toBeNull();
   });
 
   test("wakeStopAt: per-wake timeout, or the world end + grace, whichever is first", () => {

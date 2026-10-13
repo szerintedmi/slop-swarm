@@ -17,6 +17,7 @@ budgets:
 # it can ask (next_wake.yaml) to wake earlier.
 scheduler:
   max_sleep_min: 5
+  first_wake_stagger_s: 150   # first wakes 2.5 min apart in the order above, so later agents find work on the forge
 
 controller:
   tick_s: 5                 # scheduler poll interval
