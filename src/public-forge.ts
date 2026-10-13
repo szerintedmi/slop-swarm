@@ -37,7 +37,9 @@ export function publicRule(method: string, path: string): { status: number; reas
   return null;
 }
 
-const DROP_REQUEST = ["authorization", "cookie", "x-forwarded-for", "x-real-ip", "x-forwarded-host", "x-forwarded-proto", "host", "sudo"];
+// accept-encoding: the forge answers uncompressed (Caddy compresses); Bun's fetch would decode the body and keep the
+// forge's content-encoding header, so the browser would fail to decode it.
+const DROP_REQUEST = ["authorization", "cookie", "x-forwarded-for", "x-real-ip", "x-forwarded-host", "x-forwarded-proto", "host", "sudo", "accept-encoding"];
 const html = (body: string, status = 200) => new Response(body, { status, headers: { "content-type": "text/html; charset=utf-8", "x-robots-tag": "noindex", "cache-control": "public, max-age=60" } });
 const esc = (s: string) => s.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 
@@ -124,6 +126,9 @@ export function createPublicForge(o: PublicForgeOptions): (req: Request, peer?: 
     }
     const out = new Headers(res.headers);
     out.delete("set-cookie");
+    // The body is already decoded (see DROP_REQUEST): never claim an encoding or a length it no longer has.
+    out.delete("content-encoding");
+    out.delete("content-length");
     out.set("x-robots-tag", "noindex");
     return new Response(res.body, { status: res.status, headers: out });
   };
