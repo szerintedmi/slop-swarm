@@ -101,13 +101,20 @@ export function pricingForModels(pricingYaml: string, models: Iterable<string>):
   return `${header.join("\n")}\n${Bun.YAML.stringify(expected, null, 2)}\n`;
 }
 
-export function writeSelf(selfDir: string, budgetUsd: number, finishedWakes: WakeRow[], pricingYaml: string, models: Iterable<string>): void {
-  mkdirSync(selfDir, { recursive: true });
+/** The /self files (paths relative to /self), sent to the agent host by each wake's prepare. */
+export function selfFiles(budgetUsd: number, finishedWakes: WakeRow[], pricingYaml: string, models: Iterable<string>): { path: string; content: string }[] {
   let spent = 0;
   const ledger = finishedWakes.map((w) => {
     spent += w.cost_usd;
     return usageLine(w, budgetUsd, spent);
   });
-  writeFileSync(join(selfDir, "usage.jsonl"), ledger.length ? ledger.join("\n") + "\n" : "");
-  writeFileSync(join(selfDir, "pricing.yaml"), pricingForModels(pricingYaml, models));
+  return [
+    { path: "usage.jsonl", content: ledger.length ? ledger.join("\n") + "\n" : "" },
+    { path: "pricing.yaml", content: pricingForModels(pricingYaml, models) },
+  ];
+}
+
+export function writeSelf(selfDir: string, budgetUsd: number, finishedWakes: WakeRow[], pricingYaml: string, models: Iterable<string>): void {
+  mkdirSync(selfDir, { recursive: true });
+  for (const f of selfFiles(budgetUsd, finishedWakes, pricingYaml, models)) writeFileSync(join(selfDir, f.path), f.content);
 }

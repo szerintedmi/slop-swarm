@@ -90,6 +90,34 @@ export interface RelayDeps {
   fetchLogFile?: string;
   /** DNS and connection hooks of /fetch (tests). */
   fetchDeps?: FetchDeps;
+  /** The relay's own structured log (relayLogger); default: none. */
+  processLog?: RelayLog;
+}
+
+export type RelaySeverity = "INFO" | "WARN" | "ERROR";
+export type RelayLog = (severity: RelaySeverity, body: string, attrs?: Record<string, unknown>) => void;
+
+/**
+ * The relay's process log: one JSON object per line, with the field names of src/log.ts (OpenTelemetry's log data
+ * model plus `slopswarm.*` attributes), to stdout (`docker logs`) and to `file` (the runner serves it with its own
+ * log). Request outcomes only: query text and URLs stay in search.jsonl / fetch.jsonl.
+ */
+export function relayLogger(o: { world?: string; file?: string; out?: (line: string) => void; now?: () => number }): RelayLog {
+  const out = o.out ?? ((l: string) => console.log(l));
+  return (severity, body, attrs = {}) => {
+    const line: Record<string, unknown> = { timestamp: new Date((o.now ?? Date.now)()).toISOString(), severity_text: severity, body, "service.name": "relay" };
+    if (o.world) line["slopswarm.world"] = o.world;
+    for (const [k, v] of Object.entries(attrs)) if (v !== undefined && v !== null) line[k === "agent" || k === "wake_id" ? `slopswarm.${k}` : k.includes(".") ? k : `slopswarm.${k}`] = v;
+    const text = JSON.stringify(line);
+    out(text);
+    if (o.file) {
+      try {
+        appendFileSync(o.file, text + "\n");
+      } catch {
+        /* logging never fails a request */
+      }
+    }
+  };
 }
 
 interface ExaResult {
@@ -214,7 +242,13 @@ function exaError(status: number): { status: number; msg: string } {
 }
 
 export function createHandler(deps: RelayDeps): (req: Request) => Promise<Response> {
-  const log = (e: SearchLogEntry) => appendFileSync(deps.logFile, JSON.stringify(e) + "\n");
+  const plog: RelayLog = deps.processLog ?? (() => {});
+  const log = (e: SearchLogEntry) => {
+    appendFileSync(deps.logFile, JSON.stringify(e) + "\n");
+    plog(e.status === 200 ? "INFO" : "WARN", `search ${e.status}${e.error ? `: ${e.error.split(":")[0]}` : `, ${e.results} result(s)`}`, {
+      agent: e.agent, wake_id: e.wake, "http.response.status_code": e.status, latency_ms: e.latency_ms, results: e.results, exa_cost_usd: e.exa_cost_usd ?? undefined,
+    });
+  };
   const webfetch = createFetchHandler(deps);
   return async (req) => {
     const url = new URL(req.url);
@@ -223,7 +257,10 @@ export function createHandler(deps: RelayDeps): (req: Request) => Promise<Respon
     if (url.pathname !== "/search") return text("not found", 404);
     if (req.method !== "POST") return text("use POST /search", 405);
     const who = lookupToken(deps.tokensFile, req.headers.get("authorization"));
-    if (!who) return text("search: not authorised (no valid token for a running wake)", 401);
+    if (!who) {
+      plog("WARN", "search refused: no valid token", { "http.response.status_code": 401 });
+      return text("search: not authorised (no valid token for a running wake)", 401);
+    }
     if (!who.search) return text("search: not available to this agent (it uses its harness's own web search)", 403);
 
     let raw: unknown;
@@ -310,10 +347,14 @@ const hv = (s: string) => s.replace(/[^\x20-\x7e]/g, "?").slice(0, 2000);
  */
 function createFetchHandler(deps: RelayDeps): (req: Request) => Promise<Response> {
   const fetchDeps = deps.fetchDeps ?? defaultFetchDeps;
+  const plog: RelayLog = deps.processLog ?? (() => {});
   return async (req) => {
     if (req.method !== "POST") return text("use POST /fetch", 405);
     const who = lookupToken(deps.tokensFile, req.headers.get("authorization"));
-    if (!who) return text("webfetch: not authorised (no valid token for a running wake)", 401);
+    if (!who) {
+      plog("WARN", "fetch refused: no valid token", { "http.response.status_code": 401 });
+      return text("webfetch: not authorised (no valid token for a running wake)", 401);
+    }
     if (!deps.webfetch || !deps.fetchLogFile) return text("webfetch: not available in this world", 503);
     let body: unknown;
     try {
@@ -347,6 +388,9 @@ function createFetchHandler(deps: RelayDeps): (req: Request) => Promise<Response
       entry.relay_status = res.status;
       entry.latency_ms = deps.now() - started;
       appendFileSync(deps.fetchLogFile!, JSON.stringify(entry) + "\n");
+      plog(entry.relay_status === 200 ? "INFO" : "WARN", `fetch ${entry.relay_status}${entry.blocked ? ": blocked" : entry.error ? `: ${entry.error.split(":")[0]}` : `, ${entry.bytes} bytes`}`, {
+        agent: entry.agent, wake_id: entry.wake, "http.response.status_code": entry.relay_status, latency_ms: entry.latency_ms, bytes: entry.bytes, redirects: entry.redirects,
+      });
       return res;
     };
     let r;
@@ -387,7 +431,9 @@ export function webfetchFromEnv(env: Record<string, string | undefined>): Webfet
 if (import.meta.main) {
   const port = Number(process.env.PORT ?? 8080);
   const webfetch = webfetchFromEnv(process.env);
+  const plog = relayLogger({ world: process.env.SLOPSWARM_WORLD?.trim() || undefined, file: process.env.PROCESS_LOG_FILE ?? "/log/relay.jsonl" });
   const handler = createHandler({
+    processLog: plog,
     apiKey: process.env.EXA_API_KEY?.trim() || undefined,
     tokensFile: process.env.TOKENS_FILE ?? "/tokens/tokens.json",
     logFile: process.env.LOG_FILE ?? "/log/search.jsonl",
@@ -402,11 +448,12 @@ if (import.meta.main) {
     hostname: "0.0.0.0",
     fetch: (req) =>
       handler(req).catch((err) => {
-        console.error(`relay error: ${String(err).slice(0, 300)}`);
+        plog("ERROR", `relay error: ${String(err).slice(0, 300)}`, { "url.path": new URL(req.url).pathname });
         return text("search relay error", 500);
       }),
   });
-  console.log(
-    `search relay on :${port} (exa ${process.env.EXA_API_KEY?.trim() ? "configured" : "NOT configured"}; webfetch ${webfetch ? `on, ${webfetch.maxBytes} bytes, ${webfetch.timeoutMs} ms, ${webfetch.maxRedirects} redirects` : "off"})`,
-  );
+  plog("INFO", `relay on :${port}`, {
+    exa: process.env.EXA_API_KEY?.trim() ? "configured" : "not configured",
+    webfetch: webfetch ? { max_bytes: webfetch.maxBytes, timeout_ms: webfetch.timeoutMs, max_redirects: webfetch.maxRedirects } : "off",
+  });
 }

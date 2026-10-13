@@ -1,0 +1,28 @@
+# Agent-facing limits of the agent host (docs/plans/2026-10-12-hosted-control-plane.md, Decisions).
+# Deployed with the controller and pushed to the runner at every run start; not editable from the dashboard.
+# The runner reports back the hash of what it applied, and the run snapshot records it.
+
+network:
+  name: slopswarm-internal
+  proxy: http://slopswarm-proxy:8888
+  allowlist:                # egress domains (suffix match); default = model APIs only
+    - api.anthropic.com
+    - chatgpt.com
+    - api.openai.com
+    - auth.openai.com
+    - openrouter.ai           # OpenRouter models (pi agents) and the generation cost lookup
+    - github.com              # public GitHub, read-only without the github: outlet; covers api. and uploads.
+    - githubusercontent.com   # raw files, release assets
+
+container: { cpus: 1, memory_gb: 2, pids_limit: 256 }   # per agent wake
+
+runner:
+  watchdog_s: 300           # no word from the controller this long while wakes run: the runner kills them all
+  hard_timeout_slack_s: 60  # the runner kills a wake this long after its per-wake timeout (the controller's own kill comes first)
+  home_warn_mb: 200         # home sync: a warning event above this
+  home_cap_mb: 2000         # home sync: refused above this (the VPS copy stays at its last generation)
+  home_excludes:            # never synced to the VPS (names matched at any depth)
+    - node_modules
+    - .venv
+    - __pycache__
+    - .cache

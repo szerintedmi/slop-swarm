@@ -3,9 +3,36 @@
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
+-- A world: a forge plus the agents' homes (docs/plans/2026-10-12-hosted-control-plane.md §3). A run is a
+-- time-boxed session in one world; runs from before worlds became worlds of the same id.
+CREATE TABLE IF NOT EXISTS worlds (
+  id            TEXT PRIMARY KEY,           -- also the forge's hostname part (slopswarm-forge-<id>)
+  name          TEXT NOT NULL,
+  created_at    INTEGER NOT NULL,
+  forge_image   TEXT NOT NULL,              -- the Forgejo image its forge last ran (upgrades run its migrations)
+  status        TEXT NOT NULL DEFAULT 'idle',  -- idle | active (a run is in it) | archived
+  forge_port    INTEGER                     -- the host port of its forge (stable per world on the VPS)
+);
+
+-- Per world and agent: what carries over between runs. `agents` rows stay per run.
+CREATE TABLE IF NOT EXISTS world_agents (
+  world_id        TEXT NOT NULL REFERENCES worlds(id),
+  name            TEXT NOT NULL,
+  harness         TEXT NOT NULL,
+  last_session_id TEXT,
+  continue_next   INTEGER NOT NULL DEFAULT 0,
+  home_generation INTEGER NOT NULL DEFAULT 0,   -- the VPS backup copy's generation (0 = none yet)
+  added_at        INTEGER NOT NULL,
+  removed_at      INTEGER,                      -- left the world (between runs); its home is kept
+  PRIMARY KEY (world_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
   id            TEXT PRIMARY KEY,           -- e.g. 20261010-1200-tiny-society-A
   name          TEXT NOT NULL,
+  world_id      TEXT,                       -- the world it ran in (worlds.id)
+  brief         TEXT,                       -- optional run brief, added to each agent's first wake note
+  host_hash     TEXT,                       -- hash of the allowlist and limits the runner applied (hostconfig.ts)
   config_yaml   TEXT NOT NULL,              -- swarm + agent YAML snapshot
   seed_sha256   TEXT NOT NULL,
   seed_text     TEXT NOT NULL,
@@ -113,13 +140,14 @@ CREATE INDEX IF NOT EXISTS events_run_ts ON events(run_id, ts);
 -- Control queue written by `just pause/unpause/wake/stop` and the dashboard; consumed by the controller.
 CREATE TABLE IF NOT EXISTS controls (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id      TEXT NOT NULL,
+  run_id      TEXT,                         -- NULL for launch
   agent       TEXT,
-  action      TEXT NOT NULL,                -- pause | unpause | wake | stop | kill | extend
+  action      TEXT NOT NULL,                -- pause | unpause | wake | stop | kill | extend | launch (run_id NULL)
   created_at  INTEGER NOT NULL,
   consumed_at INTEGER,
-  source      TEXT,                         -- cli | dashboard
-  detail      TEXT                          -- JSON arguments (extend)
+  source      TEXT,                         -- cli | dashboard | api
+  detail      TEXT,                         -- JSON arguments (extend, launch)
+  result      TEXT                          -- JSON outcome of a launch: {"run": id} or {"error": "…"}
 );
 
 -- More world time and/or budget for a run (`just extend`), applied by the controller. The record of every
@@ -134,4 +162,27 @@ CREATE TABLE IF NOT EXISTS extensions (
   new_deadline   INTEGER NOT NULL,
   swarm_usd      REAL NOT NULL DEFAULT 0,
   agent_usd_json TEXT NOT NULL DEFAULT '{}'  -- {"*": every agent, "<name>": that agent}; the flags add up
+);
+
+-- Config in the DB (docs/plans/2026-10-12-hosted-control-plane.md §4): editable without a redeploy. Each holds YAML
+-- (or the seed's text) validated on save by the config parsers; config/ in git is the default set loaded into an
+-- empty DB (`just config export|import` syncs files and DB). Every run still freezes a snapshot (runs.config_yaml,
+-- seed_text, pricing_yaml).
+CREATE TABLE IF NOT EXISTS seeds (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,   -- the version
+  text        TEXT NOT NULL,
+  sha256      TEXT NOT NULL,
+  note        TEXT,
+  created_at  INTEGER NOT NULL,
+  active      INTEGER NOT NULL DEFAULT 0           -- exactly one active
+);
+CREATE TABLE IF NOT EXISTS agent_profiles (
+  name        TEXT PRIMARY KEY,
+  yaml        TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS swarm_presets (
+  name        TEXT PRIMARY KEY,
+  yaml        TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
 );

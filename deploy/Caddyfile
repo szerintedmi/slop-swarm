@@ -1,0 +1,41 @@
+# The public read-only forge (docs/plans/2026-10-12-hosted-control-plane.md §7). PUBLIC_FORGE_DOMAIN comes from the
+# VPS env file only (unlisted: never in the repo, CI logs or committed config). One subdomain per world plus an index
+# at the apex. Certificates on demand: the controller's /ask says which hostnames are worlds.
+{
+	on_demand_tls {
+		ask http://127.0.0.1:7780/ask
+	}
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_FORGE_DOMAIN}, *.{$PUBLIC_FORGE_DOMAIN} {
+	tls {
+		on_demand
+	}
+	# Read-only: GET and HEAD, plus POST to git-upload-pack (anonymous clone).
+	@write {
+		not method GET HEAD
+		not {
+			method POST
+			path */git-upload-pack
+		}
+	}
+	respond @write "read-only" 405
+	# No logins, no admin: all of /user/* except avatars, /admin*, the admin API.
+	@private {
+		path /user/* /admin* /api/v1/admin*
+		not path /user/avatar/*
+	}
+	respond @private "not here" 404
+	# Archive downloads are expensive on a one-CPU forge.
+	@archive path */archive/*
+	respond @archive "archives are off" 404
+	request_header -Authorization
+	request_header -Cookie
+	header -Set-Cookie
+	header X-Robots-Tag "noindex"
+	# The controller maps the hostname to the world's forge, applies the same rules again and rate-limits per client.
+	reverse_proxy 127.0.0.1:7780 {
+		header_up X-Real-IP {remote_host}
+	}
+}

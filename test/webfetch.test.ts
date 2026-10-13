@@ -24,8 +24,9 @@ import {
 import { loadSwarm, parseSwarm, type SwarmConfig } from "../src/config.ts";
 import { Controller, type ControllerOptions } from "../src/controller/index.ts";
 import { createRun } from "../src/controller/run.ts";
-import type { ProcessHandle } from "../src/controller/wake.ts";
-import { agentDirs, openDb } from "../src/db/index.ts";
+import { openDb, worldDirs } from "../src/db/index.ts";
+import { runnerRelayDirs } from "../src/runner/runner.ts";
+import { fakeAgentHost, silentLogger } from "./helpers/agent-host.ts";
 import { renderReport } from "../src/report.ts";
 import { issueSearchToken, relayNeeded, revokeSearchToken, runSearchDirs, searchDirs, searchHost, searchRunArgs, tokenPath } from "../src/search.ts";
 import { readFetchLog, webfetchPromptBlock } from "../src/webfetch.ts";
@@ -511,7 +512,6 @@ function config(webfetch: unknown): SwarmConfig {
       budgets: { swarm_usd: 1, per_agent_usd: 0.5, per_wake: { max_usd: 0.1, max_turns: 10, timeout_min: 5 } },
       scheduler: { max_sleep_min: 15, max_concurrent_wakes: 4 },
       controller: { tick_s: 1 },
-      network: { name: "slopswarm-internal", proxy: "http://slopswarm-proxy:8888", allowlist: ["api.anthropic.com", "openrouter.ai"] },
       ...(webfetch !== undefined ? { webfetch } : {}),
     },
     (name) =>
@@ -563,9 +563,16 @@ const FIXTURES: Record<string, string> = {
 };
 const T0 = Date.UTC(2026, 9, 11, 12, 0, 0);
 
+interface WakeCtx {
+  runId: string;
+  /** The world relay's dirs on the agent host. */
+  relay: ReturnType<typeof runnerRelayDirs>;
+  runtime(agent: string): string;
+}
+
 async function runWakes(
   cfg: SwarmConfig,
-  during?: (agent: string, runId: string) => Promise<void>,
+  during?: (agent: string, ctx: WakeCtx) => Promise<void>,
   vendorCosts: NonNullable<ControllerOptions["wakeDeps"]>["vendorCosts"] = async () => new Map(),
 ) {
   const db = openDb(":memory:");
@@ -574,38 +581,40 @@ async function runWakes(
     `models:\n  "z-ai/glm-5.3-flash":\n    provider: openrouter\n    per_mtok: { input: 0.15, output: 0.5, cache_read: 0.03 }\n`,
   );
   const runId = createRun(db, cfg, { pricingYaml }, T0);
-  mkdirSync(runSearchDirs(runId).log, { recursive: true });
-  // Codex copies its auth on first wake; give it one so the wake starts.
-  writeFileSync(join(agentDirs(runId, "sorrel").runtime, "auth.json"), "{}");
+  // Codex agents get their own copy of the master login on their first wake; give it one so the wake starts.
+  const codexAuthPath = join(mkdtempSync(join(dataDir, "codex-")), "auth.json");
+  writeFileSync(codexAuthPath, "{}");
   process.env.TEST_WF_KEY = "sk-test-not-real";
   const argvs = new Map<string, string[]>();
   const tokens = new Map<string, boolean>();
-  const startProcess = (argv: string[]): ProcessHandle => {
-    const agent = argv.find((a) => a.startsWith("slopswarm.agent="))!.split("=")[1]!;
-    argvs.set(agent, argv);
-    tokens.set(agent, existsSync(tokenPath(agentDirs(runId, agent).runtime)));
-    const done = (async () => during?.(agent, runId))();
-    const harness = cfg.agents.find((a) => a.name === agent)!.harness;
-    const stdout = new ReadableStream<Uint8Array>({
-      async start(c) {
-        await done;
-        c.enqueue(new TextEncoder().encode(FIXTURES[harness]));
-        c.close();
-      },
-    });
-    return { stdout, exited: done.then(() => 0) };
-  };
+  let ctx!: WakeCtx;
+  const agentHost = fakeAgentHost({
+    dataDir,
+    behave: (agent, argv) => {
+      argvs.set(agent, argv);
+      tokens.set(agent, existsSync(tokenPath(ctx.runtime(agent))));
+      const harness = cfg.agents.find((a) => a.name === agent)!.harness;
+      return (async () => {
+        await during?.(agent, ctx);
+        return FIXTURES[harness]!;
+      })();
+    },
+  });
+  ctx = { runId, relay: runnerRelayDirs(agentHost.runnerDir, runId), runtime: (agent) => agentHost.dirs(runId, agent).runtime };
+  mkdirSync(ctx.relay.log, { recursive: true });
   const ctl = new Controller(db, runId, cfg, {
     forge: { unread: async () => 0 },
-    log: () => {},
+    host: agentHost.host,
+    image: "slopswarm-agent:test",
+    logger: silentLogger,
     now: () => T0,
-    wakeDeps: { startProcess, killContainer: async () => {}, vendorCosts },
+    wakeDeps: { forgeToken: () => "forge-token", outputPollMs: 1, vendorCosts, codexAuthPath },
   });
   ctl.tick();
   await ctl.whenIdle();
   delete process.env.TEST_WF_KEY;
-  const prompt = (agent: string) => readFileSync(join(agentDirs(runId, agent).runtime, "system-prompt.md"), "utf8");
-  return { db, runId, argvs, tokens, prompt };
+  const prompt = (agent: string) => readFileSync(join(ctx.runtime(agent), "system-prompt.md"), "utf8");
+  return { db, runId, argvs, tokens, prompt, ctx, agentHost };
 }
 
 describe("wakes", () => {
@@ -616,13 +625,12 @@ describe("wakes", () => {
     const cfg = config({});
     const block = webfetchPromptBlock(cfg.webfetch!);
     const mapDuring: Record<string, { agent: string; search: boolean }> = {};
-    const r = await runWakes(cfg, async (agent, runId) => {
-      const map = JSON.parse(readFileSync(runSearchDirs(runId).tokensFile, "utf8")) as Record<string, { agent: string; search: boolean }>;
+    const r = await runWakes(cfg, async (agent, ctx) => {
+      const map = JSON.parse(readFileSync(ctx.relay.tokensFile, "utf8")) as Record<string, { agent: string; search: boolean }>;
       for (const v of Object.values(map)) mapDuring[v.agent] = v;
       // One agent fetches mid-wake: the relay logs it under the agent's wake.
       if (agent === "bramble") {
-        const d = runSearchDirs(runId);
-        const res = await relay(d).handler(post("/fetch", tokenOf(agentDirs(runId, agent).runtime), { url: "http://site.example.com/plain" }));
+        const res = await relay(ctx.relay).handler(post("/fetch", tokenOf(ctx.runtime(agent)), { url: "http://site.example.com/plain" }));
         expect(res.status).toBe(200);
       }
     });
@@ -644,10 +652,10 @@ describe("wakes", () => {
     expect(r.prompt("bramble")).not.toContain("websearch");
     expect(arg(r.argvs.get("bramble")!, "--tools")).toBe("Bash,Read,Write,Edit,WebSearch");
     expect(arg(r.argvs.get("wren")!, "--tools")).toBe("Bash,Read,Write,Edit");
-    expect(readFileSync(join(agentDirs(r.runId, "bramble").self, "pricing.yaml"), "utf8")).not.toContain("exa-search");
-    // Tokens are revoked after the wakes; the fetch is in the log and the report, not billed.
-    expect(JSON.parse(readFileSync(runSearchDirs(r.runId).tokensFile, "utf8"))).toEqual({});
-    const log = readFetchLog(runSearchDirs(r.runId).fetchLogFile);
+    expect(readFileSync(join(r.agentHost.dirs(r.runId, "bramble").self, "pricing.yaml"), "utf8")).not.toContain("exa-search");
+    // Tokens are revoked after the wakes; the fetch is in the log (mirrored to the world on the controller's side) and the report, not billed.
+    expect(JSON.parse(readFileSync(r.ctx.relay.tokensFile, "utf8"))).toEqual({});
+    const log = readFetchLog(worldDirs(r.runId).fetchLog);
     expect(log).toHaveLength(1);
     expect(log[0]!.agent).toBe("bramble");
     const report = renderReport(r.db, r.runId, T0 + 60_000);
@@ -659,9 +667,9 @@ describe("wakes", () => {
   test("a relay search in an OpenRouter wake: billed, and the cross-check still sets the vendor cost", async () => {
     const r = await runWakes(
       config(undefined),
-      async (agent, runId) => {
+      async (agent, ctx) => {
         if (agent !== "fern") return;
-        const d = runSearchDirs(runId);
+        const d = ctx.relay;
         const tokens = JSON.parse(readFileSync(d.tokensFile, "utf8")) as Record<string, { agent: string; wake: number }>;
         const wake = Object.values(tokens).find((v) => v.agent === "fern")!.wake;
         const entry = { id: "s1", ts: new Date(T0).toISOString(), agent, wake, query: "q", params: {}, type: "auto", results: 1, pages: {}, exa_cost_usd: 0.007, latency_ms: 1, status: 200, error: null };

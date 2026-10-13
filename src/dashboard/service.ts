@@ -1,9 +1,13 @@
 // Host-side data service. Database/file handles never enter SvelteKit load results.
-import { join } from 'node:path';
-import { agentDirs, enqueueControl, getRun, runDir, type AgentRow, type ControlAction, type EventRow, type RequestRow, type RunRow, type WakeRow } from '../db/index.ts';
+import { queueControl } from '../api.ts';
+import { getRun, worldDirs, worldOf, type AgentRow, type ControlAction, type EventRow, type RequestRow, type RunRow, type WakeRow } from '../db/index.ts';
 import type { AgentEvent, Harness, StreamParser } from '../types.ts';
 import type { DashboardOptions } from './server.ts';
-import { activity, agentsOf, fileTree, overviewState, readSafeFile, runLive, wakesOf, type TreeNode, type Activity } from './data.ts';
+import { activity, agentsOf, overviewState, runLive, wakesOf, type TreeNode, type Activity } from './data.ts';
+import { homeFile, homeTree } from './homes.ts';
+import { diskUse } from '../backup.ts';
+import { listWorlds } from '../controller/worlds.ts';
+import { listAgentProfiles, listPresets, listSeeds } from '../config-db.ts';
 import { bytes, isMarkdown } from './format.ts';
 import { readFetchLog } from '../webfetch.ts';
 
@@ -16,8 +20,8 @@ const countFiles = (nodes: TreeNode[]): number => nodes.reduce((n, x) => n + (x.
 
 // Send only display fields to the browser, never config/seed snapshots or host log paths.
 function publicRun(run: RunRow) {
-  const { id, name, status, started_at, deadline_at, ended_at, stop_reason } = run;
-  return { id, name, status, started_at, deadline_at, ended_at, stop_reason };
+  const { id, name, status, started_at, deadline_at, ended_at, stop_reason, brief } = run;
+  return { id, name, status, started_at, deadline_at, ended_at, stop_reason, brief, world: worldOf(run) };
 }
 function publicWake(wake: WakeRow) {
   const { raw_log_path, container_name, ...display } = wake;
@@ -36,6 +40,8 @@ async function defaultParser(harness: Harness): Promise<StreamParser> {
 export function createDashboardService(opts: DashboardOptions) {
   const { db } = opts;
   const readonly = !!opts.readonly;
+  /** Launching and editing config need the controller service behind the API (not `just dash`). */
+  const canWrite = !readonly && !!opts.api?.service;
   function selectedRun(url: URL): RunRow | null {
     const wm = /^\/wake\/(\d+)$/.exec(url.pathname);
     const wake = wm ? db.query<WakeRow, [number]>('SELECT * FROM wakes WHERE id = ?').get(Number(wm[1])) : null;
@@ -48,7 +54,9 @@ export function createDashboardService(opts: DashboardOptions) {
       runs: db.query<{ id: string; status: string }, []>('SELECT id, status FROM runs ORDER BY started_at DESC LIMIT 100').all(),
       readonly,
       live: !!run && runLive(run),
-      forgeUrl: run && opts.forge?.runId === run.id ? opts.forge.url : null,
+      forgeUrl: run ? (opts.forgeFor?.(worldOf(run)) ?? (opts.forge?.runId === run.id ? opts.forge.url : null)) : null,
+      // Under 10% free on the data dir's disk: the header warns.
+      diskLow: (() => { const d = diskUse(); return d && d.freeRatio < 0.1 ? { freeBytes: d.freeBytes, freeRatio: d.freeRatio } : null; })(),
     };
   }
   // The raw log is parsed into the page but served on its own (GET /wake/<id>/raw) when opened.
@@ -95,8 +103,46 @@ export function createDashboardService(opts: DashboardOptions) {
         return [lastUsage.get(e.usage.requestId)!];
       });
       // Web fetches are free and not in the DB; the relay's log has them (src/webfetch.ts).
-      const webFetches = readFetchLog(join(runDir(wake.run_id), 'search', 'log', 'fetch.jsonl'), wake.id).length;
+      const wakeRun = getRun(db, wake.run_id);
+      const webFetches = wakeRun ? readFetchLog(worldDirs(worldOf(wakeRun)).fetchLog, wake.id).length : 0;
       return { kind: 'wake' as const, wake: publicWake(wake), webFetches, requests, unseen: requests.filter(r => !seen.has(r.request_id)), events, rawNote, parserError, live: wake.ended_at == null };
+    }
+    // Pages that aren't about one run: worlds, a world and its homes, config.
+    if (path === '/worlds') {
+      const worlds = listWorlds(db).map(w => ({ ...w, forgeUrl: opts.forgeFor?.(w.id) ?? null }));
+      return { kind: 'worlds' as const, worlds, presets: listPresets(db).map(p => p.name), readonly: !canWrite, live: false };
+    }
+    const wm2 = /^\/world\/([^/]+)$/.exec(path);
+    if (wm2) {
+      const id = decodeURIComponent(wm2[1]!);
+      const world = listWorlds(db).find(w => w.id === id);
+      if (!world) return { kind: 'missing' as const, status: 404, message: `world ${id}` };
+      const runs = db.query<RunRow, [string]>('SELECT * FROM runs WHERE COALESCE(world_id, id) = ? ORDER BY started_at DESC').all(id).map(publicRun);
+      const agent = url.searchParams.get('agent');
+      let home = null;
+      if (agent && world.agents.some(a => a.name === agent)) {
+        const t = await homeTree(opts.host, id, agent);
+        const tree = visibleTree(t.tree);
+        const top = tree.filter(n => n.kind === 'file').sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0));
+        const selected = url.searchParams.get('path') || (top.find(n => isMarkdown(n.name)) ?? top[0])?.name || '';
+        const file = selected ? (await homeFile(t.source.live ? opts.host : undefined, id, agent, selected)).file : null;
+        home = { agent, tree, fileCount: countFiles(tree), selected, file, source: t.source };
+      }
+      return { kind: 'world' as const, world: { ...world, forgeUrl: opts.forgeFor?.(id) ?? null }, runs, home, presets: listPresets(db).map(p => p.name), readonly: !canWrite, live: !!world.activeRun };
+    }
+    if (path === '/config') {
+      const t = url.searchParams.get('tab');
+      const tab = t === 'agents' || t === 'seeds' ? t : 'presets';
+      const edit = url.searchParams.get('edit');
+      const seedId = Number(url.searchParams.get('seed') ?? 0);
+      const seeds = listSeeds(db);
+      const seed = seeds.find(x => x.id === seedId) ?? seeds.find(x => x.active) ?? null;
+      return {
+        kind: 'config' as const, tab, edit,
+        presets: listPresets(db), agents: listAgentProfiles(db),
+        seeds: seeds.map(({ text: _t, ...x }) => x), seed,
+        readonly: !canWrite, live: false,
+      };
     }
     if (!run) return path === '/' ? { kind: 'empty' as const } : { kind: 'missing' as const, status: 404, message: 'no runs yet' };
     if (path === '/') return { kind: 'overview' as const, run: publicRun(run), state: overviewState(db, run), feed: publicActivity(activity(db, run, 80)), readonly, live: runLive(run) };
@@ -106,8 +152,8 @@ export function createDashboardService(opts: DashboardOptions) {
       const name = url.searchParams.get('agent');
       if (!name || !agentsOf(db, run.id).some(a => a.name === name)) return { kind: 'missing' as const, status: 404, message: `agent ${name ?? '(none)'}` };
       const selected = url.searchParams.get('path') ?? '';
-      const file = readSafeFile(agentDirs(run.id, name).home, selected);
-      return { kind: 'file' as const, run: publicRun(run), name, selected, file, live: false };
+      const { file, source } = await homeFile(opts.host, worldOf(run), name, selected);
+      return { kind: 'file' as const, run: publicRun(run), name, selected, file, homeSource: source, live: false };
     }
     const am = /^\/agent\/([^/]+)$/.exec(path);
     if (am) {
@@ -115,18 +161,19 @@ export function createDashboardService(opts: DashboardOptions) {
       const agent = db.query<AgentRow, [string, string]>('SELECT * FROM agents WHERE run_id = ? AND name = ?').get(run.id, name);
       if (!agent) return { kind: 'missing' as const, status: 404, message: `agent ${name}` };
       const wakes = wakesOf(db, run.id, name);
-      const home = agentDirs(run.id, name).home;
-      const tree = visibleTree(fileTree(home, 6, 1000, ['.git']) ?? []);
-      const top = tree.filter(n => n.kind === 'file').sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0));
-      const selected = url.searchParams.get('path') || (top.find(n => isMarkdown(n.name)) ?? top[0])?.name || '';
       const t = url.searchParams.get('tab');
       const tab = t === 'wakes' || t === 'memory' ? t : 'summary';
+      const home = await homeTree(tab === 'memory' || tab === 'summary' ? opts.host : undefined, worldOf(run), name);
+      const tree = visibleTree(home.tree);
+      const top = tree.filter(n => n.kind === 'file').sort((a, b) => (b.mtime ?? 0) - (a.mtime ?? 0));
+      const selected = url.searchParams.get('path') || (top.find(n => isMarkdown(n.name)) ?? top[0])?.name || '';
       // Only the summary tab shows the cost curve, last words and feed.
       const summary = tab === 'summary';
       let cum = 0;
       const done = summary ? [...wakes].reverse().filter(w => w.ended_at != null) : [];
       const points = summary ? [{ t: run.started_at, v: 0 }, ...done.map(w => ({ t: w.ended_at!, v: cum += w.cost_usd }))] : [];
-      return { kind: 'agent' as const, run: publicRun(run), agent, wakes: wakes.map(publicWake), tree: tab === 'memory' ? tree : [], fileCount: countFiles(tree), selected, tab, file: tab === 'memory' && selected ? readSafeFile(home, selected) : null,
+      const file = tab === 'memory' && selected ? (await homeFile(home.source.live ? opts.host : undefined, worldOf(run), name, selected)).file : null;
+      return { kind: 'agent' as const, run: publicRun(run), agent, wakes: wakes.map(publicWake), tree: tab === 'memory' ? tree : [], fileCount: countFiles(tree), selected, tab, file, homeSource: home.source,
         points, lastSaid: summary ? overviewState(db, run).agents.find(a => a.name === name)?.lastSaid : undefined,
         feed: summary ? publicActivity(activity(db, run, 400).filter(a => 'agent' in a && a.agent === name).slice(0, 40)) : [], readonly, live: runLive(run) };
     }
@@ -142,11 +189,12 @@ export function createDashboardService(opts: DashboardOptions) {
     const run = getRun(db, String(form.get('run') ?? '') || opts.runId);
     if (!run) return new Response('unknown run', { status: 400 });
     if (!ACTIONS.includes(action)) return new Response('unknown action', { status: 400 });
-    if (agent) {
-      if (!AGENT_ACTIONS.includes(action)) return new Response('action does not take an agent', { status: 400 });
-      if (!agentsOf(db, run.id).some(a => a.name === agent)) return new Response('unknown agent', { status: 400 });
-    } else if (AGENT_ACTIONS.includes(action)) return new Response('action needs an agent', { status: 400 });
-    enqueueControl(db, run.id, action, agent, 'dashboard');
+    // The no-JavaScript fallback of the dashboard's controls: the same checks and queue as the API (src/api.ts).
+    try {
+      queueControl(db, { run, action, agent, source: 'dashboard' });
+    } catch (e) {
+      return new Response((e as Error).message, { status: 400 });
+    }
     const back = req.headers.get('referer');
     const fallback = agent ? `/agent/${encodeURIComponent(agent)}?run=${encodeURIComponent(run.id)}` : `/?run=${encodeURIComponent(run.id)}`;
     const ref = back ? new URL(back) : null;

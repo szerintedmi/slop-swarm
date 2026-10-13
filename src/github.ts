@@ -28,11 +28,19 @@ export function githubEnv(): Record<string, string> {
   return { GH_CONFIG_DIR: `${MOUNTS.runtime}/github/gh` };
 }
 
+/** The GitHub login files, relative to the runtime dir (rewritten into it by every prepare). */
+export function githubLoginFiles(user: string, token: string): { path: string; content: string; mode: number }[] {
+  return [
+    { path: "github/gh/hosts.yml", content: ["github.com:", `    user: ${user}`, `    oauth_token: ${token}`, "    git_protocol: https", ""].join("\n"), mode: 0o600 },
+    // Only for github.com; the forge keeps its own credential store.
+    { path: "github/gitconfig", content: ['[credential "https://github.com"]', "\thelper =", "\thelper = !gh auth git-credential", ""].join("\n"), mode: 0o644 },
+  ];
+}
+
 export function writeGithubLogin(runtimeDir: string, user: string, token: string): void {
-  const p = githubLoginPaths(runtimeDir);
   mkdirSync(join(runtimeDir, "github", "gh"), { recursive: true });
-  writeFileSync(p.hosts, ["github.com:", `    user: ${user}`, `    oauth_token: ${token}`, "    git_protocol: https", ""].join("\n"));
-  chmodSync(p.hosts, 0o600);
-  // Only for github.com; the forge keeps its own credential store.
-  writeFileSync(p.gitconfig, ['[credential "https://github.com"]', "\thelper =", "\thelper = !gh auth git-credential", ""].join("\n"));
+  for (const f of githubLoginFiles(user, token)) {
+    writeFileSync(join(runtimeDir, f.path), f.content);
+    chmodSync(join(runtimeDir, f.path), f.mode);
+  }
 }

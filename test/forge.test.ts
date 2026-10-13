@@ -10,6 +10,7 @@ import {
   forgeHost,
   forgePort,
   forgeRunArgs,
+  forgeToken,
   forgeUrl,
   forwarderRunArgs,
   loginPaths,
@@ -17,6 +18,7 @@ import {
   writeAgentLogin,
 } from "../src/forge.ts";
 import { githubEnv, githubLoginPaths, writeGithubLogin } from "../src/github.ts";
+import { worldAgentDirs } from "../src/db/index.ts";
 
 const dataDir = mkdtempSync(join(tmpdir(), "slopswarm-forge-"));
 process.env.SLOPSWARM_DATA_DIR = dataDir;
@@ -54,7 +56,7 @@ describe("names and env", () => {
 
 describe("containers", () => {
   test("the forge has no published port and only the internal network", () => {
-    const args = forgeRunArgs({ runId: RUN, image: "forgejo:x", network: "slopswarm-internal" });
+    const args = forgeRunArgs({ world: RUN, image: "forgejo:x", network: "slopswarm-internal" });
     expect(args.slice(0, 2)).toEqual(["docker", "run"]);
     expect(args).not.toContain("-p");
     expect(all(args, "--network")).toEqual(["slopswarm-internal"]);
@@ -66,12 +68,12 @@ describe("containers", () => {
     for (const e of ["FORGEJO__repository__DISABLE_MIGRATIONS=true", "FORGEJO__mirror__ENABLED=false", "FORGEJO__service__DISABLE_REGISTRATION=true"])
       expect(env).toContain(e);
     expect(env).toContain(`FORGEJO__server__ROOT_URL=${forgeUrl(RUN)}/`);
-    expect(all(args, "-v")).toEqual([`${join(dataDir, "runs", RUN, "forge")}:/var/lib/gitea:rw`]);
+    expect(all(args, "-v")).toEqual([`${join(dataDir, "worlds", RUN, "forge")}:/var/lib/gitea:rw`]);
     expect(args.at(-1)).toBe("forgejo:x");
   });
 
   test("the forwarder publishes on localhost only", () => {
-    const args = forwarderRunArgs({ runId: RUN, network: "slopswarm-internal", hostPort: 3300 });
+    const args = forwarderRunArgs({ world: RUN, network: "slopswarm-internal", hostPort: 3300 });
     expect(all(args, "-p")).toEqual(["127.0.0.1:3300:3000"]);
     expect(all(args, "--network")).toEqual(["slopswarm-egress", "slopswarm-internal"]);
     expect(args.at(-1)).toBe(`TCP:${forgeHost(RUN)}:3000`);
@@ -164,19 +166,20 @@ describe("ForgeClient", () => {
       const client = new ForgeClient(f.url, { user: "operator", password: "adminpw" });
       await client.waitReady(2000);
       expect(await client.adminWorks()).toBe(true);
-      const rt = mkdtempSync(join(dataDir, "rt-"));
-      await provisionAgents(client, RUN, [{ name: "wren", runtimeDir: rt }]);
-      const t1 = readFileSync(loginPaths(rt).token, "utf8").trim();
+      await provisionAgents(client, RUN, ["wren"]);
+      const t1 = forgeToken(RUN, "wren")!;
       expect(f.tokens.get(t1)).toBe("wren");
+      // The token is kept on the controller's side, owner-only.
+      expect(statSync(worldAgentDirs(RUN, "wren").forgeToken).mode & 0o777).toBe(0o600);
       // Resume: the stored token still works, nothing is re-created.
       const before = f.seen.length;
-      await provisionAgents(client, RUN, [{ name: "wren", runtimeDir: rt }]);
-      expect(readFileSync(loginPaths(rt).token, "utf8").trim()).toBe(t1);
+      await provisionAgents(client, RUN, ["wren"]);
+      expect(forgeToken(RUN, "wren")).toBe(t1);
       expect(f.seen.slice(before).map((s) => `${s.method} ${s.path}`)).toEqual(["GET /user"]);
       // A dead token: the existing user gets a new password and token.
       f.tokens.clear();
-      await provisionAgents(client, RUN, [{ name: "wren", runtimeDir: rt }]);
-      const t2 = readFileSync(loginPaths(rt).token, "utf8").trim();
+      await provisionAgents(client, RUN, ["wren"]);
+      const t2 = forgeToken(RUN, "wren")!;
       expect(t2).not.toBe(t1);
       expect(f.tokens.get(t2)).toBe("wren");
       expect(f.seen.some((s) => s.method === "PATCH" && s.path === "/admin/users/wren")).toBe(true);

@@ -3,9 +3,10 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database } from "bun:sqlite";
-import { agentDirs, openDb } from "../src/db/index.ts";
+import { openDb, worldAgentDirs } from "../src/db/index.ts";
 import { fileTree, startDashboard } from "../src/dashboard/server.ts";
 import { esc } from "../src/dashboard/format.ts";
+import { ensureConfigDefaults } from "../src/config-db.ts";
 import type { AgentEvent, StreamParser } from "../src/types.ts";
 
 const RUN = "20261010-1200-test";
@@ -59,9 +60,16 @@ function seed(db: Database, rawLog: string) {
     RUN,
     now - 90_000,
   );
-  // Agent home files.
-  const home = agentDirs(RUN, "bramble").home;
-  mkdirSync(home, { recursive: true });
+  // The world the run is in (what the migration of an older DB, or createRun, makes).
+  db.query("UPDATE runs SET world_id = ? WHERE id = ?").run(RUN, RUN);
+  db.query("INSERT INTO worlds (id, name, created_at, forge_image, status) VALUES (?, 'tiny-society-T', ?, 'forgejo:16', 'active')").run(RUN, now - 3_600_000);
+  for (const name of ["bramble", "thistle"])
+    db.query("INSERT INTO world_agents (world_id, name, harness, home_generation, added_at) VALUES (?, ?, 'claude', ?, ?)").run(RUN, name, name === "bramble" ? 1 : 0, now - 3_600_000);
+  // Agent home files: the VPS backup copy, generation 1 (no agent host in these dashboards).
+  const wa = worldAgentDirs(RUN, "bramble");
+  mkdirSync(join(wa.gens, "1", "home"), { recursive: true });
+  Bun.spawnSync(["ln", "-s", "gens/1", wa.current]);
+  const home = wa.home;
   writeFileSync(join(home, "notes.md"), "# bramble notes\n- goal: map the <forge>\n");
   writeFileSync(join(home, "blob.bin"), Buffer.from([0, 1, 2, 3]));
   Bun.spawnSync(["ln", "-s", "/etc/passwd", join(home, "passwd-link")]);
@@ -233,6 +241,7 @@ describe("dashboard", () => {
     const base = `/agent/bramble?run=${RUN}&amp;tab=memory&amp;path=`;
     const memory = await mem();
     expect(memory).toContain("memory · 5"); // notes.md, blob.bin, main.ts, README.md, <img…>.txt
+    expect(memory).toContain("VPS copy, as of generation 1");
     expect(memory).toContain(`href="${base}notes.md"`);
     expect(memory).toContain("map the &lt;forge&gt;"); // newest top-level file selected by default, escaped
     expect(memory).not.toContain("passwd-link"); // symlinks are skipped
@@ -330,6 +339,37 @@ describe("dashboard", () => {
     const res = await fetch(`${ro.url}/control`, { method: "POST", body: new URLSearchParams({ run: RUN, action: "kill" }), headers: { origin: new URL(ro.url).origin, "sec-fetch-site": "same-origin" } });
     expect(res.status).toBe(403);
     expect(await res.text()).toContain("read-only");
+  });
+});
+
+describe("worlds and config pages", () => {
+  test("worlds: the run's world, its agents and home generations; a launch form only with a controller", async () => {
+    const page = markup(await (await fetch(`${dash.url}/worlds`)).text());
+    expect(page).toContain(`href="/world/${RUN}"`);
+    expect(page).toContain("bramble</a> g1");
+    // These dashboards have no controller service: no launch form, and the API refuses writes.
+    expect(page).not.toContain("Launch a run");
+    const res = await fetch(`${dash.url}/api/v1/launches`, { method: "POST", headers: { "x-slopswarm": "t", "content-type": "application/json" }, body: JSON.stringify({ preset: "smoke" }) });
+    expect(res.status).toBe(403);
+  });
+
+  test("a world: agents, runs, and its home browser from the VPS copy", async () => {
+    const page = markup(await (await fetch(`${dash.url}/world/${RUN}?agent=bramble&path=notes.md`)).text());
+    expect(page).toContain(`World ${RUN}`);
+    expect(page).toContain(`href="/?run=${RUN}"`);
+    expect(page).toContain("VPS copy, as of generation 1");
+    expect(page).toContain("map the &lt;forge&gt;");
+    expect((await fetch(`${dash.url}/world/nope`)).status).toBe(404);
+  });
+
+  test("config: presets, agent profiles and seed versions", async () => {
+    ensureConfigDefaults(db);
+    const presets = markup(await (await fetch(`${dash.url}/config?edit=smoke`)).text());
+    expect(presets).toContain("presets · 2");
+    expect(presets).toContain("max_duration_min: 8");
+    const seeds = markup(await (await fetch(`${dash.url}/config?tab=seeds`)).text());
+    expect(seeds).toContain("v1 · active");
+    expect(seeds).toContain("You are {name}");
   });
 });
 

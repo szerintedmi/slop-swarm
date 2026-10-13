@@ -5,6 +5,14 @@ export interface ContainerSpec {
   image: string;
   runId: string;
   agent: string;
+  /** The world the wake belongs to, and the wake's id (container name) on the runner: labels for reattach and kill. */
+  world?: string;
+  wake?: string;
+  /**
+   * `docker run -d` without `--rm` (the runner, src/runner/): the container outlives the docker CLI, so a restarted
+   * runner reattaches to it by label, and its exit code and logs survive until the runner removes it.
+   */
+  detach?: boolean;
   /** Host paths. Agents share nothing on disk; their shared world is the forge (plan §4.5). */
   mounts: { home: string; self: string; runtime: string };
   env: Record<string, string>;
@@ -40,11 +48,13 @@ export function dockerRunArgs(spec: ContainerSpec): string[] {
     ...spec.env,
   };
   const args = [
-    "docker", "run", "--rm", "--init",
+    "docker", "run", spec.detach ? "-d" : "--rm", "--init",
     "--name", spec.name,
     "--label", "slopswarm=1",
     "--label", `slopswarm.run=${spec.runId}`,
     "--label", `slopswarm.agent=${spec.agent}`,
+    ...(spec.world ? ["--label", `slopswarm.world=${spec.world}`] : []),
+    ...(spec.wake ? ["--label", `slopswarm.wake=${spec.wake}`] : []),
     "--user", AGENT_UID,
     "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges",
@@ -81,9 +91,9 @@ async function run(argv: string[]): Promise<{ code: number; stdout: string; stde
   return { code, stdout, stderr };
 }
 
-/** `docker kill` every container labelled slopswarm (optionally only one run). Returns the killed names. */
-export async function dockerKillLabelled(filter: { runId?: string } = {}): Promise<string[]> {
-  const label = filter.runId ? `slopswarm.run=${filter.runId}` : "slopswarm=1";
+/** `docker kill` every container labelled slopswarm (optionally only one run or world). Returns the killed names. */
+export async function dockerKillLabelled(filter: { runId?: string; world?: string } = {}): Promise<string[]> {
+  const label = filter.world ? `slopswarm.world=${filter.world}` : filter.runId ? `slopswarm.run=${filter.runId}` : "slopswarm=1";
   const ps = await run(["docker", "ps", "-q", "--filter", `label=${label}`, "--format", "{{.Names}}"]);
   const names = ps.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
   if (names.length) await run(["docker", "kill", ...names]);

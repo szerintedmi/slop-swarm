@@ -1,4 +1,5 @@
 // OpenRouter: catalogue -> pricing snapshot and pi's models.json, the generation cost lookup, agent config.
+import { checkHostFor, parseHostConfig } from "../src/hostconfig.ts";
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { parseAgent, parseSwarm } from "../src/config.ts";
@@ -168,17 +169,19 @@ describe("agent config", () => {
     expect(() => parseAgent({ name: "bramble", harness: "claude", model: "m", key_env: "X" }, 1, "a")).toThrow(/key_env/);
   });
 
-  test("a run with OpenRouter agents needs openrouter.ai on the allowlist", () => {
-    const swarm = (allowlist: string[]) => ({
-      run: { name: "t", max_duration_min: 60 },
-      agents: ["fern"],
-      budgets: { swarm_usd: 1, per_agent_usd: 1, per_wake: { max_usd: 0.1, max_turns: 10, timeout_min: 5 } },
-      scheduler: { max_sleep_min: 15 },
-      network: { name: "n", proxy: "http://p:8888", allowlist },
-    });
-    const fern = (name: string) => ({ name, harness: "pi", provider: "openrouter", model: PRESET });
-    expect(() => parseSwarm(swarm(["api.anthropic.com"]), fern)).toThrow(/openrouter\.ai/);
-    expect(parseSwarm(swarm(["openrouter.ai"]), fern).agents[0]!.provider).toBe("openrouter");
+  test("a run with OpenRouter agents needs openrouter.ai on the host allowlist", () => {
+    const swarm = parseSwarm(
+      {
+        run: { name: "t", max_duration_min: 60 },
+        agents: ["fern"],
+        budgets: { swarm_usd: 1, per_agent_usd: 1, per_wake: { max_usd: 0.1, max_turns: 10, timeout_min: 5 } },
+        scheduler: { max_sleep_min: 15 },
+      },
+      (name: string) => ({ name, harness: "pi", provider: "openrouter", model: PRESET }),
+    );
+    const host = (allowlist: string[]) => parseHostConfig({ network: { name: "n", proxy: "http://p:8888", allowlist } });
+    expect(checkHostFor(swarm, host(["api.anthropic.com"]))).toMatch(/openrouter\.ai/);
+    expect(checkHostFor(swarm, host(["openrouter.ai"]))).toBeNull();
   });
 
   test("the sample agent parses", () => {

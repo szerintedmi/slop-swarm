@@ -1,7 +1,7 @@
 // Markdown cost summary for a run (plan §12).
 import type { Database } from "bun:sqlite";
-import type { AgentRow, RequestRow, RunRow, WakeRow } from "./db/index.ts";
-import { billed, readSearchLog, runSearchDirs, SEARCH_MODEL } from "./search.ts";
+import { worldDirs, worldOf, type AgentRow, type RequestRow, type RunRow, type WakeRow } from "./db/index.ts";
+import { billed, readSearchLog, SEARCH_MODEL } from "./search.ts";
 import { fetched, readFetchLog, type FetchLogEntry } from "./webfetch.ts";
 import { describeExtension, extensionsOf, swarmBudgetUsd, worldGaps, worldTime } from "./world.ts";
 
@@ -133,7 +133,10 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
     );
   }
 
-  const log = readSearchLog(runSearchDirs(runId).logFile);
+  // The relay's logs are per world (earlier runs of it included): this run's wakes only.
+  const runWakeIds = new Set(allWakes.map((w) => w.id));
+  const relayLogs = worldDirs(worldOf(run));
+  const log = readSearchLog(relayLogs.relayLog).filter((e) => runWakeIds.has(e.wake));
   if (searchRequests.length || log.length) {
     out.push("## Web search (relay)", "");
     const ours = searchRequests.reduce((s, r) => s + r.cost_usd, 0);
@@ -153,7 +156,7 @@ export function renderReport(db: Database, runId: string, now = Date.now()): str
     if (lat.length) out.push(`Latency: median ${n(median(lat))} ms, p90 ${n(quantile(lat, 0.9))} ms.`, "");
   }
 
-  const fetches = readFetchLog(runSearchDirs(runId).fetchLogFile);
+  const fetches = readFetchLog(relayLogs.fetchLog).filter((e) => runWakeIds.has(e.wake));
   if (fetches.length) out.push("## Web fetch (relay)", "", ...fetchSummary(fetches), "");
 
   out.push("## Per wake", "");

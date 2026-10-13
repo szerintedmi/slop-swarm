@@ -36,9 +36,7 @@ export interface SwarmConfig {
   };
   controller: {
     tickMs: number;
-    container: { cpus: number; memoryGb: number; pidsLimit: number };
   };
-  network: { name: string; proxy: string; allowlist: string[] };
   /** The run's Forgejo (plan §4.5). `port` is the host port of the owner's view (FORGE_PORT overrides it at start). */
   forge: { image: string; port: number; pollMs: number };
   /** The agents' public outlet: a GitHub org they all reach through one shared account. Absent = no GitHub. */
@@ -147,15 +145,18 @@ export function parseSwarm(
   const perWake = obj(budgets.per_wake, "budgets.per_wake");
   const sch = obj(s.scheduler, "scheduler");
   const ctl = obj(s.controller ?? {}, "controller");
-  const cont = obj(ctl.container ?? {}, "controller.container");
-  const net = obj(s.network, "network");
+  // `network:` and `controller.container:` moved to config/host.yaml; earlier runs' snapshots still carry them (ignored).
   const forge = obj(s.forge ?? {}, "forge");
 
   const perAgentUsd = num(budgets.per_agent_usd, "budgets.per_agent_usd");
   if (!Array.isArray(s.agents) || s.agents.length === 0) throw new ConfigError("agents: expected a non-empty list of agent names");
+  // Each entry is a profile name, or `{ name, …overrides }` (a preset's per-agent overrides, e.g. budget_usd or model).
   const agents = s.agents.map((n, i) => {
-    const name = str(n, `agents[${i}]`);
-    const a = parseAgent(loadAgent(name), perAgentUsd, `agents/${name}.yaml`);
+    const entry = typeof n === "object" && n !== null && !Array.isArray(n) ? (n as Record<string, unknown>) : null;
+    const name = str(entry ? entry.name : n, `agents[${i}]${entry ? ".name" : ""}`);
+    const profile = loadAgent(name);
+    const merged = entry ? { ...obj(profile, `agents/${name}.yaml`), ...entry, name: (profile as Record<string, unknown>)?.name } : profile;
+    const a = parseAgent(merged, perAgentUsd, `agents/${name}.yaml`);
     if (a.name !== name) throw new ConfigError(`agents/${name}.yaml: name is ${a.name}, expected ${name}`);
     return a;
   });
@@ -184,16 +185,6 @@ export function parseSwarm(
     },
     controller: {
       tickMs: num(ctl.tick_s ?? 5, "controller.tick_s") * S,
-      container: {
-        cpus: num(cont.cpus ?? 1, "controller.container.cpus"),
-        memoryGb: num(cont.memory_gb ?? 2, "controller.container.memory_gb"),
-        pidsLimit: num(cont.pids_limit ?? 256, "controller.container.pids_limit", { min: 16 }),
-      },
-    },
-    network: {
-      name: str(net.name, "network.name"),
-      proxy: str(net.proxy, "network.proxy"),
-      allowlist: (Array.isArray(net.allowlist) ? net.allowlist : []).map((d, i) => str(d, `network.allowlist[${i}]`)),
     },
     forge: {
       image: str(forge.image ?? DEFAULT_FORGE_IMAGE, "forge.image"),
@@ -202,11 +193,10 @@ export function parseSwarm(
     },
   };
   if (cfg.scheduler.maxSleepMs > cfg.run.maxDurationMs) throw new ConfigError("scheduler: max_sleep_min longer than run.max_duration_min");
-  if (agents.some((a) => a.provider === "openrouter") && !onAllowlist(cfg.network.allowlist, OPENROUTER_DOMAIN))
-    throw new ConfigError(`network.allowlist needs ${OPENROUTER_DOMAIN} for the OpenRouter agents`);
+  // The allowlist the agents need (openrouter.ai, GitHub's domains) is checked against config/host.yaml at launch (hostconfig.ts checkHostFor).
   return {
     ...cfg,
-    ...(s.github !== undefined ? { github: parseGithub(s.github, cfg.network.allowlist) } : {}),
+    ...(s.github !== undefined ? { github: parseGithub(s.github) } : {}),
     ...(s.webfetch !== undefined && s.webfetch !== false ? { webfetch: parseWebfetch(s.webfetch) } : {}),
   };
 }
@@ -230,19 +220,13 @@ function parseWebfetch(raw: unknown): WebfetchConfig {
   };
 }
 
-function onAllowlist(allowlist: string[], domain: string): boolean {
-  return allowlist.some((a) => a.trim().toLowerCase().replace(/^\*?\./, "") === domain);
-}
-
-function parseGithub(raw: unknown, allowlist: string[]): { org: string; user: string } {
+function parseGithub(raw: unknown): { org: string; user: string } {
   const gh = obj(raw, "github");
   const name = (v: unknown, field: string) => {
     const n = str(v, field);
     if (!GITHUB_NAME_RE.test(n)) throw new ConfigError(`${field}: not a valid GitHub name`);
     return n;
   };
-  const missing = GITHUB_DOMAINS.filter((d) => !onAllowlist(allowlist, d));
-  if (missing.length) throw new ConfigError(`github: network.allowlist needs ${missing.join(", ")}`);
   return { org: name(gh.org, "github.org"), user: name(gh.user, "github.user") };
 }
 
@@ -257,7 +241,8 @@ export function swarmFromSnapshot(snapshot: string): SwarmConfig {
       chunks.set(key, "");
     } else chunks.set(key, (chunks.get(key) ?? "") + line + "\n");
   }
-  const [swarmKey] = [...chunks.keys()].filter((k) => !k.startsWith("agents/"));
+  // The host config (§4.3) is recorded in the snapshot too, after the swarm and agents.
+  const [swarmKey] = [...chunks.keys()].filter((k) => !k.startsWith("agents/") && k !== HOST_SNAPSHOT_KEY && k !== "");
   if (swarmKey === undefined) throw new ConfigError("snapshot has no swarm section");
   const parsed = parseSwarm(Bun.YAML.parse(chunks.get(swarmKey)!), (name) => {
     const text = chunks.get(`agents/${name}.yaml`);
@@ -265,6 +250,15 @@ export function swarmFromSnapshot(snapshot: string): SwarmConfig {
     return Bun.YAML.parse(text);
   });
   return { ...parsed, paths: { swarm: swarmKey, seed: "", pricing: "", configDir: "" }, snapshot };
+}
+
+/** The snapshot chunk holding the host config a run started with (config/host.yaml). */
+export const HOST_SNAPSHOT_KEY = "host.yaml";
+
+/** A run's config snapshot: `# --- <key>` chunks, swarm first, then each agent profile, then the host config. */
+export function buildSnapshot(swarmKey: string, swarmText: string, agentTexts: [string, string][], hostYaml?: string): string {
+  const chunk = (k: string, t: string) => `# --- ${k}\n${t.endsWith("\n") ? t : t + "\n"}`;
+  return [chunk(swarmKey, swarmText), ...agentTexts.map(([n, t]) => chunk(`agents/${n}.yaml`, t)), ...(hostYaml !== undefined ? [chunk(HOST_SNAPSHOT_KEY, hostYaml)] : [])].join("");
 }
 
 export function loadSwarm(swarmPath: string): SwarmConfig {

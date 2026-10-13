@@ -1,0 +1,52 @@
+# The VPS (docs/plans/2026-10-12-hosted-control-plane.md §6.3; runbook: docs/deploy.md). Ships inside the controller
+# image; deploy/slopswarm-deploy copies it to /opt/slopswarm and runs it with the images by digest from
+# /opt/slopswarm/image.env. Secrets only in /etc/slopswarm/slopswarm.env (root-only) and /etc/slopswarm/secrets/.
+name: slopswarm
+
+services:
+  controller:
+    image: ${SLOPSWARM_IMAGE:?set by slopswarm-deploy}
+    container_name: slopswarm-controller
+    restart: unless-stopped
+    # The host network: it binds 127.0.0.1 and the tailnet address (SLOPSWARM_BIND), and the forges it starts publish
+    # on the host. It needs the Docker socket to start forges: root-equivalent on a single-purpose VPS.
+    network_mode: host
+    env_file: /etc/slopswarm/slopswarm.env
+    environment:
+      SLOPSWARM_AGENT_IMAGE: ${SLOPSWARM_AGENT_IMAGE:-}
+      SLOPSWARM_ALL_FORGES: "1"           # every world's forge stays up: browsable, and public through Caddy
+      SLOPSWARM_ENSURE_NETWORKS: "1"      # no proxy compose here: the controller creates the forge networks
+      SLOPSWARM_BACKUPS: "1"
+      FORGE_NETWORK: slopswarm-internal
+      SLOPSWARM_PUBLIC_PORT: "7780"       # the public forge proxy Caddy forwards to (only with PUBLIC_FORGE_DOMAIN)
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The same path inside and out: forges' bind mounts are host paths.
+      - /var/lib/slopswarm:/var/lib/slopswarm
+      - /etc/slopswarm/secrets:/etc/slopswarm/secrets
+    # SIGTERM detaches: the active run keeps running on the agent host; the new controller resumes it.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r = await fetch('http://127.0.0.1:' + (process.env.PORT ?? 7777) + '/api/v1/runs'); process.exit(r.ok ? 0 : 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # The public read-only forge (§7): on only with `--profile public` (slopswarm-deploy adds it when the env file has
+  # PUBLIC_FORGE_DOMAIN). Ports 80/443 on the public interface; everything goes to the controller's public proxy.
+  caddy:
+    image: caddy:2.8.4
+    container_name: slopswarm-caddy
+    profiles: [public]
+    restart: unless-stopped
+    network_mode: host
+    # Only what the Caddyfile needs, never the secrets env file (slopswarm-deploy writes caddy.env from it).
+    env_file: caddy.env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

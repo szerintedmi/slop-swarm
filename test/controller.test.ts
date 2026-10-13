@@ -1,13 +1,13 @@
 // Controller end to end with a fake `docker run` that replays CLI fixtures.
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadSwarm, parseSwarm, type SwarmConfig } from "../src/config.ts";
 import { Controller, type ControllerOptions } from "../src/controller/index.ts";
 import { createRun } from "../src/controller/run.ts";
-import type { ProcessHandle } from "../src/controller/wake.ts";
 import { agentDirs, enqueueControl, getRun, openDb, type AgentRow, type EventRow, type ExtensionRow, type RequestRow, type WakeRow } from "../src/db/index.ts";
+import { fakeAgentHost, silentLogger, type FakeAgentHost } from "./helpers/agent-host.ts";
 import { forgeHost, type ForgeApi } from "../src/forge.ts";
 import { parsePricing } from "../src/pricing/index.ts";
 import { renderReport } from "../src/report.ts";
@@ -30,7 +30,6 @@ function config(over: { perWakeMaxUsd?: number; worldEndGraceS?: number } = {}):
       // One slot so wakes happen in a deterministic order.
       scheduler: { max_sleep_min: 15, max_concurrent_wakes: 1 },
       controller: { tick_s: 1 },
-      network: { name: "slopswarm-internal", proxy: "http://slopswarm-proxy:8888", allowlist: ["api.anthropic.com"] },
     },
     (name) => ({ name, harness: "claude", model: "claude-haiku-5-5", effort: "medium" }),
   );
@@ -63,6 +62,10 @@ interface Harness {
   kills: string[];
   /** For a second controller on the same run (a resume). */
   ctlOpts: ControllerOptions;
+  /** The agent host (a real runner, fake containers). */
+  agentHost: FakeAgentHost;
+  /** An agent's dirs on the agent host. */
+  dirs(agent: string): { home: string; self: string; runtime: string };
 }
 
 /** `behave(agent, argv)` returns the stdout text, or null to hang until killed. */
@@ -74,47 +77,19 @@ function harness(
   const db = openDb(":memory:");
   const clock = { t: T0 };
   const runId = createRun(db, cfg, { cliVersions: { claude: "2.1.296" }, pricingYaml: opts.pricingYaml }, T0);
-  const argvs: string[][] = [];
-  const envs: Record<string, string | undefined>[] = [];
-  const kills: string[] = [];
-  const pending = new Map<string, () => void>();
-  const startProcess = (argv: string[], _stderr: string, env: Record<string, string | undefined>): ProcessHandle => {
-    argvs.push(argv);
-    envs.push(env);
-    const name = argv[argv.indexOf("--name") + 1]!;
-    const agent = argv.find((a) => a.startsWith("slopswarm.agent="))!.split("=")[1]!;
-    const out = behave(agent, argv);
-    let finish!: (code: number) => void;
-    const exited = new Promise<number>((r) => (finish = r));
-    const stdout = new ReadableStream<Uint8Array>({
-      start(c) {
-        if (out !== null) {
-          c.enqueue(new TextEncoder().encode(out));
-          c.close();
-          finish(0);
-        } else {
-          // Emit the first usage-bearing lines, then hang until killed.
-          c.enqueue(new TextEncoder().encode(FIXTURE.split("\n").slice(0, 3).join("\n") + "\n"));
-          pending.set(name, () => {
-            c.close();
-            finish(137);
-          });
-        }
-      },
-    });
-    return { stdout, exited };
-  };
-  let misses = opts.killMisses ?? 0;
-  const killContainer = async (name: string) => {
-    kills.push(name);
-    // A miss is `docker kill` before `docker run` has created the container.
-    if (misses > 0) misses--;
-    else pending.get(name)?.();
-  };
+  // Emit the first usage-bearing lines, then hang until killed.
+  const agentHost = fakeAgentHost({ dataDir, behave, killMisses: opts.killMisses, hangOutput: FIXTURE.split("\n").slice(0, 3).join("\n") + "\n" });
   const forge = new FakeForge();
-  const ctlOpts: ControllerOptions = { forge, log: () => {}, now: () => clock.t, wakeDeps: { startProcess, killContainer, ...opts.wakeDeps } };
+  const ctlOpts: ControllerOptions = {
+    forge,
+    host: agentHost.host,
+    image: "slopswarm-agent:test",
+    logger: silentLogger,
+    now: () => clock.t,
+    wakeDeps: { forgeToken: () => "forge-token", outputPollMs: 1, ...opts.wakeDeps },
+  };
   const ctl = new Controller(db, runId, cfg, ctlOpts);
-  return { ctl, forge, db, runId, clock, argvs, envs, kills, ctlOpts };
+  return { ctl, forge, db, runId, clock, argvs: agentHost.argvs, envs: agentHost.envs, kills: agentHost.kills, ctlOpts, agentHost, dirs: (agent) => agentHost.dirs(runId, agent) };
 }
 
 const agentRow = (h: Harness, name: string) => h.db.query<AgentRow, [string, string]>("SELECT * FROM agents WHERE run_id = ? AND name = ?").get(h.runId, name)!;
@@ -129,7 +104,7 @@ describe("controller", () => {
 
   test("wake: cost, forge env, notifications, next_wake, resume, report", async () => {
     const h = harness(config(), (agent, argv) => {
-      const home = agentDirs(h.runId, agent).home;
+      const home = h.dirs(agent).home;
       // Bramble mentions thistle on the forge in each wake.
       if (agent === "bramble") h.forge.notify("thistle", h.clock.t);
       if (agent === "bramble" && !argv.includes("--resume")) writeFileSync(join(home, "next_wake.yaml"), "in_minutes: 10\ncontinue_session: true\n");
@@ -171,7 +146,7 @@ describe("controller", () => {
     expect(note1).not.toContain("Unread"); // nothing unread: no inbox line
 
     // /self was written and is consistent.
-    const self = agentDirs(h.runId, "bramble").self;
+    const self = h.dirs("bramble").self;
     expect(existsSync(join(self, "STATUS.md"))).toBe(false);
     const selfPricing = readFileSync(join(self, "pricing.yaml"), "utf8");
     expect(selfPricing).toContain("claude-haiku-5-5");
@@ -216,7 +191,7 @@ describe("controller", () => {
     expect(system).toStartWith("You are bramble. You live in a shared world");
     expect(system).not.toMatch(/\{[a-z_]+\}/);
     expect(argv[argv.indexOf("--tools") + 1]).toBe("Bash,Read,Write,Edit,WebSearch");
-    expect(readFileSync(join(agentDirs(h.runId, "bramble").runtime, "system-prompt.md"), "utf8")).toBe(system);
+    expect(readFileSync(join(h.dirs("bramble").runtime, "system-prompt.md"), "utf8")).toBe(system);
     const w2 = wakesOf(h, "bramble")[1]!;
     expect(w2.resumed).toBe(1);
     expect(w2.slept_ms).toBe(10 * MIN);
@@ -231,7 +206,7 @@ describe("controller", () => {
     expect(agentRow(h, "thistle")).toMatchObject({ next_trigger: "message", next_wake_at: T0 + 10 * MIN });
     const pulls = h.db.query<EventRow, [string]>("SELECT * FROM events WHERE run_id = ? AND name = 'forge_pull'").all(h.runId);
     expect(pulls).toMatchObject([{ agent: "thistle", detail: "1 unread" }]);
-    expect(readFileSync(join(agentDirs(h.runId, "bramble").self, "usage.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
+    expect(readFileSync(join(h.dirs("bramble").self, "usage.jsonl"), "utf8").trim().split("\n")).toHaveLength(1);
 
     const report = renderReport(h.db, h.runId, T0 + 20 * MIN);
     expect(report).toContain("## Totals");
@@ -254,7 +229,7 @@ describe("controller", () => {
     expect(h.ctl.repo.agentModels("thistle")).toEqual(["claude-haiku-5-5", "gpt-6-luna", "mystery-model"]);
     h.ctl.tick();
     await h.ctl.whenIdle();
-    const pricing = readFileSync(join(agentDirs(h.runId, "thistle").self, "pricing.yaml"), "utf8");
+    const pricing = readFileSync(join(h.dirs("thistle").self, "pricing.yaml"), "utf8");
     expect(Object.keys(parsePricing(pricing).models).sort()).toEqual(["claude-haiku-5-5", "gpt-6-luna"]);
     // The controller still costs with the full run table.
     expect(Object.keys(parsePricing(getRun(h.db, h.runId)!.pricing_yaml).models)).toContain("gpt-6-luna");
@@ -506,7 +481,8 @@ describe("controller", () => {
     const d = agentDirs(h.runId, "bramble");
     const raw = join(d.raw, "0001.jsonl");
     writeFileSync(raw, FIXTURE.split("\n").slice(0, 4).join("\n") + "\n");
-    const nw = join(d.home, "next_wake.yaml");
+    mkdirSync(h.dirs("bramble").home, { recursive: true });
+    const nw = join(h.dirs("bramble").home, "next_wake.yaml");
     writeFileSync(nw, "in_minutes: 7\ncontinue_session: true\n");
     utimesSync(nw, (T0 + MIN) / 1000, (T0 + MIN) / 1000);
     h.ctl.repo.startWake({ agent: "bramble", seq: 1, trigger: "initial", started_at: T0, slept_ms: null, resumed: 0, msgs_in: 0, raw_log_path: raw, container_name: "x" });
@@ -524,7 +500,6 @@ describe("controller", () => {
         agents: ["fern"],
         budgets: { swarm_usd: 1, per_agent_usd: 0.5, per_wake: { max_usd: 0.1, max_turns: 1, timeout_min: 5 } },
         scheduler: { max_sleep_min: 15 },
-        network: { name: "slopswarm-internal", proxy: "http://slopswarm-proxy:8888", allowlist: ["openrouter.ai"] },
       },
       (name) => ({ name, harness: "pi", provider: "openrouter", model: "z-ai/glm-5.3-flash@preset/sw-glm-5-3-flash", key_env: "TEST_OR_KEY", effort: "low" }),
     );
@@ -562,7 +537,8 @@ describe("controller", () => {
 
     const [w] = wakesOf(h, "fern");
     expect(w!.exit_reason).toBe("max_turns");
-    expect(h.kills).toHaveLength(1);
+    // The fake container had already exited when the kill reached the runner; the controller did ask for it.
+    expect(h.db.query<EventRow, [number]>("SELECT * FROM events WHERE wake_id = ? AND name = 'wake_kill'").all(w!.id).map((e) => e.detail)).toEqual(["max_turns"]);
     const reqs = h.db.query<RequestRow, [number]>("SELECT * FROM requests WHERE wake_id = ? ORDER BY seq").all(w!.id);
     expect(reqs.map((r) => r.model)).toEqual(["z-ai/glm-5.3-flash", "z-ai/glm-5.3-flash"]);
     expect(w!.cost_usd).toBeCloseTo((585 * 0.15 + 768 * 0.03 + 19 * 0.5 + 34 * 0.15 + 1344 * 0.03 + 3 * 0.5) / 1e6, 12);
@@ -571,7 +547,7 @@ describe("controller", () => {
     expect(reqs.every((r) => r.vendor_cost_usd === 0.00001 && r.vendor_provider === "StreamLake")).toBe(true);
     expect(w!.reported_cost_usd).toBeCloseTo(0.00002, 12);
     // The agent sees its model's price under the slug.
-    expect(readFileSync(join(agentDirs(h.runId, "fern").self, "pricing.yaml"), "utf8")).toContain("z-ai/glm-5.3-flash");
+    expect(readFileSync(join(h.dirs("fern").self, "pricing.yaml"), "utf8")).toContain("z-ai/glm-5.3-flash");
     expect(renderReport(h.db, h.runId)).toContain("| StreamLake | 2 |");
   });
 });

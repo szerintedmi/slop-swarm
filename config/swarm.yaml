@@ -18,19 +18,8 @@ scheduler:
 
 controller:
   tick_s: 5                 # scheduler poll interval
-  container: { cpus: 1, memory_gb: 2, pids_limit: 256 }
 
-network:
-  name: slopswarm-internal
-  proxy: http://slopswarm-proxy:8888
-  allowlist:                # egress domains (suffix match); default = model APIs only
-    - api.anthropic.com
-    - chatgpt.com
-    - api.openai.com
-    - auth.openai.com
-    - openrouter.ai           # OpenRouter models (pi agents) and the generation cost lookup
-    - github.com              # public GitHub, read-only without the github: outlet below; covers api. and uploads.
-    - githubusercontent.com   # raw files, release assets
+# Egress allowlist and container limits: config/host.yaml (one file for every run, pushed to the agent host).
 
 # The agents' public outlet (plan §4.6): one org, one account they all share. Token: SWARM_GITHUB_TOKEN in .env.
 # Off for now: the org keeps repos between runs, so a new run would start from earlier runs' work.
@@ -39,7 +28,7 @@ network:
 #   user: slop-swarm-agents
 
 # Agents' `webfetch <url>` (any harness): GET-only downloads of public URLs, done by the run's relay; agents never
-# connect out themselves and the allowlist above stays as it is. Remove this section to turn it off.
+# connect out themselves and the allowlist (config/host.yaml) stays as it is. Remove this section to turn it off.
 webfetch:
   max_mb: 20                # larger downloads are refused
   timeout_s: 30             # per fetch, redirects included

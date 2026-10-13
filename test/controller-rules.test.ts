@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { loadSwarm, parseSwarm, swarmFromSnapshot } from "../src/config.ts";
+import { checkHostFor, hostConfigHash, loadHostConfig, parseHostConfig } from "../src/hostconfig.ts";
 import { isDepleted, overLimit, wakeLimit } from "../src/controller/budget.ts";
 import { fillSeed, humanDuration, makeRunId, wakeNote } from "../src/controller/run.ts";
 import { messagePull, parseNextWake, pickDue, planNextWake } from "../src/controller/scheduler.ts";
@@ -16,8 +17,9 @@ describe("config", () => {
     for (const f of ["swarm", "smoke"]) {
       const c = loadSwarm(`config/${f}.yaml`);
       expect(c.agents.length).toBeGreaterThan(0);
-      expect(c.network.allowlist).toContain("api.anthropic.com");
+      expect(checkHostFor(c, loadHostConfig())).toBeNull();
     }
+    expect(loadHostConfig().network.allowlist).toContain("api.anthropic.com");
     const smoke = loadSwarm("config/smoke.yaml");
     expect(smoke.agents.map((a) => a.harness)).toEqual(["claude", "codex", "codex", "pi"]);
     expect(smoke.scheduler.maxConcurrentWakes).toBe(4); // defaults to the number of agents
@@ -37,7 +39,6 @@ describe("config", () => {
     agents: ["a1"],
     budgets: { swarm_usd: 1, per_agent_usd: 0.5, per_wake: { max_usd: 0.1, max_turns: 5, timeout_min: 1 } },
     scheduler: { max_sleep_min: 15 },
-    network: { name: "n", proxy: "http://p:8888", allowlist: ["api.anthropic.com"] },
   });
   const agent = (o: object = {}) => ({ name: "a1", harness: "claude", model: "claude-haiku-5-5", ...o });
 
@@ -53,18 +54,38 @@ describe("config", () => {
     expect(() => parseSwarm({ ...base(), run: { name: "t" } }, () => agent())).toThrow(/run.max_duration_min/);
     expect(() => parseSwarm({ ...base(), agents: ["a1", "a1"] }, () => agent())).toThrow(/duplicate/);
     expect(() => parseSwarm({ ...base(), scheduler: { max_sleep_min: 120 } }, () => agent())).toThrow(/max_duration/);
-    expect(() => parseSwarm({ ...base(), github: { org: "o", user: "u" } }, () => agent())).toThrow(/github.com, githubusercontent.com/);
-    const net = { ...base().network, allowlist: ["api.anthropic.com", "github.com", "githubusercontent.com"] };
-    expect(() => parseSwarm({ ...base(), network: net, github: { org: "bad org", user: "u" } }, () => agent())).toThrow(/github.org/);
-    expect(parseSwarm({ ...base(), network: net, github: { org: "o", user: "u" } }, () => agent()).github).toEqual({ org: "o", user: "u" });
+    expect(() => parseSwarm({ ...base(), github: { org: "bad org", user: "u" } }, () => agent())).toThrow(/github.org/);
+    expect(parseSwarm({ ...base(), github: { org: "o", user: "u" } }, () => agent()).github).toEqual({ org: "o", user: "u" });
+    // Old snapshots carry network: and controller.container: (now in host.yaml); they still load.
+    expect(parseSwarm({ ...base(), network: { name: "n" }, controller: { container: { cpus: 1 } } }, () => agent()).agents).toHaveLength(1);
     const ok = parseSwarm(base(), () => agent({ budget_usd: 0.25 }));
     expect(ok.agents[0]!.budgetUsd).toBe(0.25);
     expect(ok.agents[0]!.effort).toBe("medium");
     // Optional sections and settings get their defaults.
     expect(ok.forge).toEqual({ image: "codeberg.org/forgejo/forgejo:16.0.4-rootless", port: 3300, pollMs: 15_000 });
     expect(ok.run.worldEndGraceMs).toBe(60_000);
-    expect(ok.controller).toMatchObject({ tickMs: 5000, container: { memoryGb: 2 } });
+    expect(ok.controller).toEqual({ tickMs: 5000 });
     expect(ok.github).toBeUndefined();
+  });
+});
+
+describe("host config", () => {
+  const host = (allowlist: string[], extra: object = {}) => parseHostConfig({ network: { name: "n", proxy: "http://p:8888", allowlist }, ...extra });
+  test("defaults, validation and the applied hash", () => {
+    const h = host(["api.anthropic.com"]);
+    expect(h.container).toEqual({ cpus: 1, memoryGb: 2, pidsLimit: 256 });
+    expect(h.runner).toMatchObject({ watchdogMs: 300_000, hardTimeoutSlackMs: 60_000, homeExcludes: [] });
+    expect(() => host(["not a domain"])).toThrow(/invalid domain/);
+    expect(() => host(["a.com"], { runner: { home_excludes: ["../x"] } })).toThrow(/home_excludes/);
+    expect(() => host(["a.com"], { runner: { watchdog_s: 5 } })).toThrow(/watchdog_s/);
+    // The hash covers what the runner applies (allowlist order and case don't matter), not runner limits.
+    expect(hostConfigHash(host(["b.com", "A.com"]))).toBe(hostConfigHash(host(["a.com", "b.com"], { runner: { watchdog_s: 60 } })));
+    expect(hostConfigHash(host(["a.com"]))).not.toBe(hostConfigHash(host(["a.com", "b.com"])));
+  });
+  test("the swarm's needs against the allowlist", () => {
+    const gh = { agents: [], github: { org: "o", user: "u" } };
+    expect(checkHostFor(gh, host(["api.anthropic.com"]))).toMatch(/github.com, githubusercontent.com/);
+    expect(checkHostFor(gh, host(["github.com", "githubusercontent.com"]))).toBeNull();
   });
 });
 

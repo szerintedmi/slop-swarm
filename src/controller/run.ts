@@ -1,8 +1,9 @@
-// Creating a run: DB rows and per-agent dirs (plan §4.1). The run's forge is started by the CLI (src/forge.ts).
+// Creating a run (plan §4.1) in a new or an existing world (docs/plans/2026-10-12-hosted-control-plane.md §3): DB
+// rows only. The world's forge and the agents' dirs on the agent host are brought up by the launcher (src/launch.ts).
 import type { Database } from "bun:sqlite";
 import { mkdirSync, readFileSync } from "node:fs";
 import type { SwarmConfig } from "../config.ts";
-import { agentDirs } from "../db/index.ts";
+import { agentDirs, getWorld, type RunRow, type WorldAgentRow } from "../db/index.ts";
 
 export function sha256(text: string): string {
   return new Bun.CryptoHasher("sha256").update(text).digest("hex");
@@ -15,34 +16,67 @@ export function makeRunId(name: string, now = Date.now()): string {
   return `${t}-${name}-${rand}`;
 }
 
+export class WorldError extends Error {}
+
+/** The run that is running (or stopping) in `world`, if any. */
+export function activeRunIn(db: Database, world: string): RunRow | null {
+  return db.query<RunRow, [string]>("SELECT * FROM runs WHERE COALESCE(world_id, id) = ? AND status IN ('running', 'stopping') ORDER BY started_at DESC LIMIT 1").get(world);
+}
+
 export function createRun(
   db: Database,
   cfg: SwarmConfig,
-  /** `pricingYaml`: the pricing snapshot (config/pricing.yaml plus fetched OpenRouter prices); default: the file. */
-  meta: { cliVersions?: Record<string, string | undefined>; imageDigest?: string; pricingYaml?: string },
+  /**
+   * `pricingYaml`: the pricing snapshot (config/pricing.yaml plus fetched OpenRouter prices); default: the file.
+   * `world`: continue that world (its forge and the agents' homes and sessions carry over); default: a new world,
+   * whose id is this run's id. `seedText`: the seed (default: the file at cfg.paths.seed).
+   */
+  meta: { cliVersions?: Record<string, string | undefined>; imageDigest?: string; pricingYaml?: string; world?: string; brief?: string | null; seedText?: string; hostHash?: string },
   now = Date.now(),
 ): string {
   const id = makeRunId(cfg.run.name, now);
-  const seed = readFileSync(cfg.paths.seed, "utf8");
+  const seed = meta.seedText ?? readFileSync(cfg.paths.seed, "utf8");
   const pricing = meta.pricingYaml ?? readFileSync(cfg.paths.pricing, "utf8");
+  const world = meta.world ?? id;
 
-  for (const a of cfg.agents) {
-    const d = agentDirs(id, a.name);
-    for (const p of [d.home, d.self, d.runtime, d.raw]) mkdirSync(p, { recursive: true });
-  }
+  for (const a of cfg.agents) mkdirSync(agentDirs(id, a.name).raw, { recursive: true });
 
   db.transaction(() => {
+    if (meta.world) {
+      const w = getWorld(db, meta.world);
+      if (!w) throw new WorldError(`world not found: ${meta.world}`);
+      if (w.status === "archived") throw new WorldError(`world ${meta.world} is archived`);
+      const active = activeRunIn(db, meta.world);
+      if (active) throw new WorldError(`world ${meta.world} has an active run (${active.id}); stop it first`);
+    } else {
+      db.query("INSERT INTO worlds (id, name, created_at, forge_image, status) VALUES (?, ?, ?, ?, 'idle')").run(world, cfg.run.name, now, cfg.forge.image);
+    }
+    // A continued world keeps its forge's image: it may have been upgraded past the preset's (`just forge-upgrade`),
+    // and an older Forgejo can't run on migrated data.
+    db.query("UPDATE worlds SET status = 'active' WHERE id = ?").run(world);
     db.query(
-      `INSERT INTO runs (id, name, config_yaml, seed_sha256, seed_text, pricing_yaml, cli_versions, image_digest, status, started_at, deadline_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
-    ).run(id, cfg.run.name, cfg.snapshot, sha256(seed), seed, pricing, JSON.stringify(meta.cliVersions ?? {}), meta.imageDigest ?? null, now, now + cfg.run.maxDurationMs);
+      `INSERT INTO runs (id, name, world_id, brief, host_hash, config_yaml, seed_sha256, seed_text, pricing_yaml, cli_versions, image_digest, status, started_at, deadline_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)`,
+    ).run(id, cfg.run.name, world, meta.brief?.trim() || null, meta.hostHash ?? null, cfg.snapshot, sha256(seed), seed, pricing, JSON.stringify(meta.cliVersions ?? {}), meta.imageDigest ?? null, now, now + cfg.run.maxDurationMs);
+
+    // Agents of the world: new ones join, returning ones carry their session over, absent ones leave (homes kept).
+    const known = new Map(db.query<WorldAgentRow, [string]>("SELECT * FROM world_agents WHERE world_id = ?").all(world).map((r) => [r.name, r]));
     const ins = db.query(
-      `INSERT INTO agents (run_id, name, harness, model, effort, budget_usd, status, next_wake_at, next_trigger)
-       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'initial')`,
+      `INSERT INTO agents (run_id, name, harness, model, effort, budget_usd, status, next_wake_at, next_trigger, last_session_id, continue_next)
+       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 'initial', ?, ?)`,
     );
-    // Everyone is due at once; max_concurrent_wakes spreads them out.
-    for (const a of cfg.agents) ins.run(id, a.name, a.harness, a.model, a.effort, a.budgetUsd, now);
-    db.query("INSERT INTO events (run_id, ts, kind, name, detail) VALUES (?, ?, 'lifecycle', 'run_created', ?)").run(id, now, cfg.paths.swarm);
+    for (const a of cfg.agents) {
+      const prev = known.get(a.name);
+      // A session only carries over on the same harness (a Codex thread id means nothing to Claude Code).
+      const carry = prev && prev.harness === a.harness ? prev : undefined;
+      // Everyone is due at once; max_concurrent_wakes spreads them out.
+      ins.run(id, a.name, a.harness, a.model, a.effort, a.budgetUsd, now, carry?.last_session_id ?? null, carry?.continue_next ?? 0);
+      if (prev) db.query("UPDATE world_agents SET harness = ?, removed_at = NULL WHERE world_id = ? AND name = ?").run(a.harness, world, a.name);
+      else db.query("INSERT INTO world_agents (world_id, name, harness, added_at) VALUES (?, ?, ?, ?)").run(world, a.name, a.harness, now);
+    }
+    const inRun = new Set(cfg.agents.map((a) => a.name));
+    for (const name of known.keys()) if (!inRun.has(name)) db.query("UPDATE world_agents SET removed_at = COALESCE(removed_at, ?) WHERE world_id = ? AND name = ?").run(now, world, name);
+    db.query("INSERT INTO events (run_id, ts, kind, name, detail) VALUES (?, ?, 'lifecycle', 'run_created', ?)").run(id, now, `${cfg.paths.swarm}${meta.world ? ` (continues world ${world})` : ""}`);
   })();
   return id;
 }
@@ -103,6 +137,8 @@ export interface WakeNoteInput {
   maxTurns: number;
   /** When this wake is stopped if still running (per-wake timeout, or the world end + grace). */
   stopsAt: number;
+  /** The run brief (first wake of the run only), e.g. "bramble/pubrepo has open PRs". */
+  brief?: string;
 }
 
 const usd = (v: number) => `$${v.toFixed(4)}`;
@@ -120,5 +156,6 @@ export function wakeNote(n: WakeNoteInput): string {
     `Budget: ${usd(Math.max(0, n.budgetUsd - n.spentUsd))} left of ${usd(n.budgetUsd)}.`,
     `This wake is stopped if it spends over ${usd(n.wakeLimitUsd)}, makes ${n.maxTurns} turns, or is still running at ${iso(n.stopsAt)}.`,
     "Past wakes' costs: /self/usage.jsonl. Prices: /self/pricing.yaml.]",
+    ...(n.brief?.trim() ? ["", `[Note from the operator: ${n.brief.trim()}]`] : []),
   ].join("\n");
 }

@@ -64,6 +64,8 @@ export function searchDirs(base: string) {
     tokensFile: join(base, "tokens", "tokens.json"),
     logFile: join(base, "log", "search.jsonl"),
     fetchLogFile: join(base, "log", "fetch.jsonl"),
+    /** The relay's own structured process log (docker/search/relay.ts relayLogger). */
+    processLogFile: join(base, "log", "relay.jsonl"),
   };
 }
 export const runSearchDirs = (runId: string) => searchDirs(join(runDir(runId), "search"));
@@ -102,15 +104,30 @@ function writeTokens(file: string, map: TokenMap): void {
  * `search: false`: the token may only fetch (an agent on its harness's own search, in a world with webfetch).
  */
 export function issueSearchToken(dirs: ReturnType<typeof searchDirs>, runtimeDir: string, agent: string, wake: number, { search = true }: { search?: boolean } = {}): void {
-  mkdirSync(dirs.tokens, { recursive: true });
-  const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
-  const map = Object.fromEntries(Object.entries(readTokens(dirs.tokensFile)).filter(([, v]) => v.agent !== agent));
-  map[sha256(token)] = { agent, wake, search };
-  writeTokens(dirs.tokensFile, map);
+  const { token, hash } = newRelayToken();
+  registerRelayToken(dirs, hash, { agent, wake, search });
   mkdirSync(join(runtimeDir, "search"), { recursive: true });
   writeFileSync(tokenPath(runtimeDir), token + "\n");
   chmodSync(tokenPath(runtimeDir), 0o600);
 }
+
+/** A fresh relay token and the hash the relay knows it by (the controller makes it; the runner registers the hash). */
+export function newRelayToken(): { token: string; hash: string } {
+  const token = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url");
+  return { token, hash: sha256(token) };
+}
+
+/** Register a token hash in the relay's tokens file; the agent's earlier tokens are dropped. */
+export function registerRelayToken(dirs: ReturnType<typeof searchDirs>, hash: string, entry: { agent: string; wake: number; search: boolean }): void {
+  if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error("relay token hash: expected sha256 hex");
+  mkdirSync(dirs.tokens, { recursive: true });
+  const map = Object.fromEntries(Object.entries(readTokens(dirs.tokensFile)).filter(([, v]) => v.agent !== entry.agent));
+  map[hash] = entry;
+  writeTokens(dirs.tokensFile, map);
+}
+
+/** The agent's runtime file holding its relay token (relative to the runtime dir; mounted at TOKEN_FILE_IN). */
+export const RELAY_TOKEN_FILE = "search/token";
 
 /** The wake is over: its token stops working. */
 export function revokeSearchToken(dirs: ReturnType<typeof searchDirs>, wake: number): void {
@@ -141,11 +158,16 @@ export interface SearchLogEntry {
 export function readSearchLog(logFile: string, wake?: number): SearchLogEntry[] {
   if (!existsSync(logFile)) return [];
   const out: SearchLogEntry[] = [];
+  // A search is billed once, even if its line appears twice.
+  const seen = new Set<string>();
   for (const line of readFileSync(logFile, "utf8").split("\n")) {
     if (!line.trim()) continue;
     try {
       const e = JSON.parse(line) as SearchLogEntry;
-      if (e && typeof e.id === "string" && (wake === undefined || e.wake === wake)) out.push(e);
+      if (e && typeof e.id === "string" && (wake === undefined || e.wake === wake) && !seen.has(e.id)) {
+        seen.add(e.id);
+        out.push(e);
+      }
     } catch {
       /* a torn last line is completed by the next read */
     }
@@ -202,14 +224,16 @@ export function searchRunArgs(o: { runId: string; image: string; network: string
     "--network", EGRESS_NETWORK,
     "-v", `${d.tokens}:/tokens:ro`,
     "-v", `${d.log}:/log:rw`,
+    // The world id for the relay's structured log (not secret).
+    "-e", `SLOPSWARM_WORLD=${o.runId}`,
     ...(o.withKey ? ["-e", "EXA_API_KEY"] : []),
     ...webfetchRelayEnv(o.webfetch),
     o.image,
   ];
 }
 
-async function docker(argv: string[]): Promise<{ code: number; out: string; err: string }> {
-  const p = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", env: process.env });
+async function docker(argv: string[], env: Record<string, string | undefined> = process.env): Promise<{ code: number; out: string; err: string }> {
+  const p = Bun.spawn(argv, { stdout: "pipe", stderr: "pipe", env });
   const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
   return { code, out, err };
 }
@@ -229,8 +253,11 @@ export async function stopSearch(runId: string): Promise<void> {
   if (ids.length) await docker(["docker", "rm", "-f", ...ids]);
 }
 
-/** Start the run's relay (replacing a leftover) and wait until it answers on the internal network. */
-export async function startSearch(o: { runId: string; network: string; dir?: string; webfetch?: WebfetchConfig }): Promise<void> {
+/**
+ * Start the run's (on the runner: the world's) relay, replacing a leftover, and wait until it answers on the internal
+ * network. `exaKey`: the key passed by name (default: EXA_API_KEY from the env).
+ */
+export async function startSearch(o: { runId: string; network: string; dir?: string; webfetch?: WebfetchConfig; exaKey?: string }): Promise<void> {
   const dir = o.dir ?? runSearchDirs(o.runId).base;
   const d = searchDirs(dir);
   mkdirSync(d.tokens, { recursive: true });
@@ -238,7 +265,8 @@ export async function startSearch(o: { runId: string; network: string; dir?: str
   if (!existsSync(d.tokensFile)) writeTokens(d.tokensFile, {});
   await ensureSearchImage();
   await stopSearch(o.runId);
-  const r = await docker(searchRunArgs({ runId: o.runId, image: SEARCH_IMAGE, network: o.network, dir, withKey: !!process.env.EXA_API_KEY?.trim(), webfetch: o.webfetch }));
+  const key = (o.exaKey ?? process.env.EXA_API_KEY)?.trim();
+  const r = await docker(searchRunArgs({ runId: o.runId, image: SEARCH_IMAGE, network: o.network, dir, withKey: !!key, webfetch: o.webfetch }), { ...process.env, EXA_API_KEY: key });
   if (r.code !== 0) throw new Error(`search relay did not start: ${r.err.trim()}`);
   // No host port: probe from inside the container.
   const until = Date.now() + 20_000;

@@ -98,6 +98,7 @@ export const claudeAdapter: HarnessAdapter = {
   harness: "claude",
   reportedCostIsCumulative: true,
   searchModes: ["native", "relay"],
+  sessionDir: "projects",
 
   buildCommand(o: CommandOptions): string[] {
     return [
