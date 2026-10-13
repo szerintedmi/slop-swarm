@@ -145,7 +145,8 @@ From a device on the tailnet, `SLOPSWARM_API=http://<vps>:7777 SLOPSWARM_API_TOK
 | What | How |
 | --- | --- |
 | Start a run | `just up smoke` (new world), `just continue <world> smoke --brief "…"`, or the dashboard's Worlds page |
-| Watch | the dashboard; `just status`, `just logs`, `just logs bramble` |
+| Watch | the dashboard (live pages refresh every 5 s, idle ones every 20 s; paused while text is selected); `just status`, `just logs`, `just logs bramble` |
+| The forge | the dashboard's *Forge ↗* link (the dashboard's host with the world's port, `FORGE_PORT` up); over the tailnet `http://<vps>:3301`, admin login from the VPS env file |
 | Stop / kill | `just stop` / `just kill` |
 | Config | dashboard Config page; `just config list|seeds|import|export` |
 | Back up now | `just backup [world…]` |
