@@ -11,5 +11,5 @@
 <td>{#if w.activeRun}<a class="st-running" href="/?run={encodeURIComponent(w.activeRun)}">active</a>{:else}<span class="st-sleeping">{w.status}</span>{/if}</td>
 <td class="num">{w.runs}</td><td class="small">{#if w.lastRunAt}<Time ts={w.lastRunAt} />{:else}—{/if}</td>
 <td class="small">{#each w.agents as a, i}{i ? ', ' : ''}<a href="/world/{encodeURIComponent(w.id)}?agent={encodeURIComponent(a.name)}" class:muted={!!a.removed_at}>{a.name}</a>{a.home_generation ? ` g${a.home_generation}` : ''}{/each}</td>
-<td class="small">{#if w.forgeUrl}<a href={w.forgeUrl} target="_blank" rel="noopener">open ↗</a>{:else}<span class="muted">{w.forge_image.replace(/^.*\//, '')}</span>{/if}</td></tr>{/each}
+<td class="small">{#if w.forgeUrl}<a href={w.forgeUrl} target="_blank" rel="noopener">open ↗</a>{:else}<span class="muted">{w.forge_image.replace(/^.*\//, '')}</span>{/if}{#if w.pagesUrl} · <a href={w.pagesUrl} target="_blank" rel="noopener">pages ↗</a>{/if}</td></tr>{/each}
 </tbody></table></div>{:else}<div class="empty">No worlds yet: launch a run.</div>{/if}

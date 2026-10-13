@@ -73,6 +73,7 @@ export function createDashboardService(opts: DashboardOptions) {
       readonly,
       live: !!run && runLive(run),
       forgeUrl: run ? forgeLink(url, opts.forgeFor?.(worldOf(run)) ?? (opts.forge?.runId === run.id ? opts.forge.url : null)) : null,
+      pagesUrl: run ? opts.pagesFor?.(worldOf(run)) ?? null : null,
       // Under 10% free on the data dir's disk: the header warns.
       diskLow: (() => { const d = diskUse(); return d && d.freeRatio < 0.1 ? { freeBytes: d.freeBytes, freeRatio: d.freeRatio } : null; })(),
     };
@@ -127,7 +128,7 @@ export function createDashboardService(opts: DashboardOptions) {
     }
     // Pages that aren't about one run: worlds, a world and its homes, config.
     if (path === '/worlds') {
-      const worlds = listWorlds(db).map(w => ({ ...w, forgeUrl: forgeLink(url, opts.forgeFor?.(w.id)) }));
+      const worlds = listWorlds(db).map(w => ({ ...w, forgeUrl: forgeLink(url, opts.forgeFor?.(w.id)), pagesUrl: opts.pagesFor?.(w.id) ?? null }));
       return { kind: 'worlds' as const, worlds, presets: listPresets(db).map(p => p.name), readonly: !canWrite, live: false };
     }
     const wm2 = /^\/world\/([^/]+)$/.exec(path);
@@ -146,7 +147,8 @@ export function createDashboardService(opts: DashboardOptions) {
         const file = selected ? (await homeFile(t.source.live ? opts.host : undefined, id, agent, selected)).file : null;
         home = { agent, tree, fileCount: countFiles(tree), selected, file, source: t.source };
       }
-      return { kind: 'world' as const, world: { ...world, forgeUrl: forgeLink(url, opts.forgeFor?.(id)) }, runs, home, presets: listPresets(db).map(p => p.name), readonly: !canWrite, live: !!world.activeRun };
+      const pages = opts.pagesOf ? await opts.pagesOf(id).catch(() => ({ url: null, repos: [] })) : { url: null, repos: [] };
+      return { kind: 'world' as const, world: { ...world, forgeUrl: forgeLink(url, opts.forgeFor?.(id)), pagesUrl: pages.url }, pages: pages.repos, runs, home, presets: listPresets(db).map(p => p.name), readonly: !canWrite, live: !!world.activeRun };
     }
     if (path === '/config') {
       const t = url.searchParams.get('tab');
@@ -168,7 +170,7 @@ export function createDashboardService(opts: DashboardOptions) {
     }
     if (!run) return path === '/' ? { kind: 'empty' as const } : { kind: 'missing' as const, status: 404, message: 'no runs yet' };
     if (path === '/') return { kind: 'overview' as const, run: publicRun(run), state: overviewState(db, run), feed: publicActivity(activity(db, run, 80)), readonly, live: runLive(run) };
-    if (path === '/agents') return { kind: 'agents' as const, run: publicRun(run), state: overviewState(db, run), live: runLive(run) };
+    if (path === '/agents') return { kind: 'agents' as const, run: publicRun(run), state: overviewState(db, run), live: runLive(run), pagesUrl: opts.pagesFor?.(worldOf(run)) ?? null };
     if (path === '/events') return { kind: 'events' as const, run: publicRun(run), events: db.query<EventRow, [string]>('SELECT * FROM events WHERE run_id = ? ORDER BY ts DESC, id DESC LIMIT 500').all(run.id), live: runLive(run) };
     if (path === '/file') {
       const name = url.searchParams.get('agent');

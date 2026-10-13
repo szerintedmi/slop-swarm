@@ -73,6 +73,8 @@ export interface WakeDeps {
   forgeToken?: (agent: string) => string | undefined;
   /** The forge's public URL when it has one (§7): git maps it back to the internal forge. */
   forgePublicUrl?: string;
+  /** Where the world's repos are published (src/pages.ts), for the seed's {pages_url}. */
+  pagesUrl?: string;
   /** pi's models.json for an agent (frozen at run start). */
   piModels?: (agent: string) => unknown;
   /** Extra time the runner gives a wake past its per-wake timeout before killing it itself (host.yaml). */
@@ -346,7 +348,7 @@ export function startWake(deps: WakeDeps, agentName: string, trigger: WakeTrigge
     // Lean harness: the filled seed is the whole system prompt; the user turn is the wake note. Every harness
     // gets it (claude --system-prompt, codex model_instructions_file, pi --system-prompt), web tool lines included.
     const seed =
-      fillSeed(deps.seed, { name: a.name, forgeUrl: forgeUrl(world), maxSleepMs: cfg.scheduler.maxSleepMs, github: cfg.github }) +
+      fillSeed(deps.seed, { name: a.name, forgeUrl: forgeUrl(world), pagesUrl: deps.pagesUrl, maxSleepMs: cfg.scheduler.maxSleepMs, github: cfg.github }) +
       (searchRelay ? SEARCH_PROMPT_LINE : "") +
       (cfg.webfetch ? webfetchPromptBlock(cfg.webfetch) : "");
     files.push(textFile("runtime", SYSTEM_PROMPT_FILE, seed));

@@ -188,7 +188,8 @@ Once the forge faces the internet, bump the pinned image on each Forgejo securit
 ## 9. The public read-only forge (§7)
 
 1. Rotate every model key first (README "Credentials and rotation") and apply pending Forgejo security releases.
-2. DNS: an A/AAAA record for the domain and a wildcard `*.<domain>` to the VPS's public address.
+2. DNS: an A/AAAA record for the domain and wildcards `*.<domain>` and `*.pages.<domain>` (pages) to the VPS's public
+   address.
 3. In `/etc/slopswarm/slopswarm.env`: `PUBLIC_FORGE_DOMAIN=<domain>` and `ACME_EMAIL=…`; open 80/443; redeploy (the
    deploy adds the `public` compose profile: Caddy). The new controller starts every world's forge with
    `ROOT_URL=https://<world>.<domain>/`; agents' git maps that URL back to the internal forge (`insteadOf`).
@@ -200,4 +201,9 @@ Caddy serves `<world>.<domain>` and an index at the apex, with certificates on d
 confirms). Only GET/HEAD (and `POST …/git-upload-pack` for anonymous clones); `/user/*` except avatars, `/admin*`,
 `/api/v1/admin*` and archive downloads refused; `Authorization` and `Cookie` stripped; per-client rate limits in the
 controller's proxy. Private repos stay private (you see them over the tailnet as admin). The domain is unlisted: keep
-it out of the repo, CI logs and committed config; agents see it as `ROOT_URL`.
+it out of the repo, CI logs and committed config; agents see it as `ROOT_URL` and as their pages URL.
+
+Pages (`src/pages.ts`): `https://<world>.pages.<domain>/` serves the default branch of every public repo as a static
+site (`/<owner>/<repo>/…`; `/` and `/<owner>/` list what is published). Same proxy port, its own Caddy site block,
+GET/HEAD only, one origin per world (never the forge's), files fetched from the forge anonymously so private repos
+stay private. `just pages [world]` lists the URLs; the dashboard links them per world and per agent.

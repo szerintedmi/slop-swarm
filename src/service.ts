@@ -15,6 +15,7 @@ import { ensureNetworks, forgeAdminFromEnv, forgeDataDir, publicForgeUrl, startF
 import type { HostConfig } from "./hostconfig.ts";
 import { agentImageRef, bringDownWorld, bringUpWorld, LaunchError, missingSecrets, prepareRun, resolveSwarm, type AgentHostHandle } from "./launch.ts";
 import type { Logger } from "./log.ts";
+import { listPublished, pagesOrigin, servePages, type PublishedRepo } from "./pages.ts";
 import { servePublicForge } from "./public-forge.ts";
 
 const LAUNCH_POLL_MS = 2_000;
@@ -53,6 +54,8 @@ export interface ServiceOptions {
   ensureNetworks?: boolean;
   /** The public read-only forge proxy Caddy forwards to (§7): PUBLIC_FORGE_DOMAIN and a localhost port. */
   publicForge?: { domain: string; port: number };
+  /** Pages (src/pages.ts) on localhost: `<world>.localhost:<port>`; the public ones go through the public forge proxy. */
+  pagesPort?: number;
 }
 
 interface Active {
@@ -82,6 +85,8 @@ export class ControllerService {
         hostname,
         host: this.o.agentHost.host,
         forgeFor: (world) => this.forges.get(world)?.url ?? null,
+        pagesFor: (world) => (this.forges.has(world) ? (this.pagesUrl(world) ?? null) : null),
+        pagesOf: (world) => this.pages(world),
         allowedHosts: [...this.o.bind, ...(process.env.SLOPSWARM_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean)],
         api: { token: this.o.apiToken, service: this },
       });
@@ -101,6 +106,10 @@ export class ControllerService {
     this.timer = setInterval(() => void this.pollLaunches(), LAUNCH_POLL_MS);
     void this.pollLaunches();
     if (this.o.backups) this.nightly = setInterval(() => void this.nightlyBackup(), 10 * 60_000);
+    if (this.o.pagesPort) {
+      this.pagesServer = servePages({ db: this.o.db, port: this.o.pagesPort, forgePort: (w) => this.forges.get(w)?.port ?? null, origin: (w) => this.pagesUrl(w)! });
+      this.o.log.info(`pages on http://<world>.localhost:${this.pagesServer.port}/`);
+    }
     if (this.o.publicForge) {
       this.publicProxy = servePublicForge({ db: this.o.db, domain: this.o.publicForge.domain, port: this.o.publicForge.port, forgePort: (w) => this.forges.get(w)?.port ?? null });
       this.o.log.info(`public forge proxy on 127.0.0.1:${this.publicProxy.port} (for Caddy)`);
@@ -108,6 +117,28 @@ export class ControllerService {
   }
 
   private publicProxy?: { stop(): void; port: number };
+  private pagesServer?: { stop(): void; port: number };
+
+  /** The world's pages origin: the public one with a public forge, else the local one (undefined: none served). */
+  pagesUrl(world: string): string | undefined {
+    return pagesOrigin(world, { publicDomain: this.o.publicForge?.domain, localPort: this.pagesServer?.port });
+  }
+
+  /** The world's published repos (its forge must be up). */
+  async pages(world: string, owner?: string): Promise<{ url: string | null; repos: PublishedRepo[] }> {
+    const url = this.pagesUrl(world) ?? null;
+    const f = this.forges.get(world);
+    if (!url || !f) return { url, repos: [] };
+    // The dashboard polls its pages: one listing per world and owner every 15 s at most (a request per repo).
+    const key = `${world}\n${owner ?? ""}`;
+    const hit = this.pagesCache.get(key);
+    if (hit && Date.now() - hit.at < 15_000) return { url, repos: await hit.repos };
+    const repos = listPublished(`http://127.0.0.1:${f.port}`, url, { owner });
+    this.pagesCache.set(key, { at: Date.now(), repos });
+    repos.catch(() => this.pagesCache.delete(key));
+    return { url, repos: await repos };
+  }
+  private readonly pagesCache = new Map<string, { at: number; repos: Promise<PublishedRepo[]> }>();
 
   private nightly?: ReturnType<typeof setInterval>;
   private lastNightly = 0;
@@ -339,7 +370,7 @@ export class ControllerService {
       image: agentImageRef(),
       logger: this.o.log,
       homeWarnBytes: this.o.hostCfg.runner.homeWarnBytes,
-      wakeDeps: { hardTimeoutSlackMs: this.o.hostCfg.runner.hardTimeoutSlackMs, forgePublicUrl: publicForgeUrl(world) },
+      wakeDeps: { hardTimeoutSlackMs: this.o.hostCfg.runner.hardTimeoutSlackMs, forgePublicUrl: publicForgeUrl(world), pagesUrl: this.pagesUrl(world) },
     });
   }
 
@@ -388,6 +419,7 @@ export class ControllerService {
     clearInterval(this.timer);
     clearInterval(this.nightly);
     this.publicProxy?.stop();
+    this.pagesServer?.stop();
     const active = this.active;
     if (active) {
       active.controller.detach();
