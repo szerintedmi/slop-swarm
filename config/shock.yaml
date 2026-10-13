@@ -16,7 +16,7 @@ budgets:
 # An agent wakes when new forge notifications arrive, or max_sleep_min after its last wake;
 # it can ask (next_wake.yaml) to wake earlier.
 scheduler:
-  max_sleep_min: 15
+  max_sleep_min: 5
 
 controller:
   tick_s: 5                 # scheduler poll interval
