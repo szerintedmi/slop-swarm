@@ -8,7 +8,7 @@ import { createInterface } from "node:readline/promises";
 import { runStatus } from "./api.ts";
 import { api, apiBase, ApiClientError } from "./api-client.ts";
 import { loadSwarm, swarmFromSnapshot } from "./config.ts";
-import { activeSeed, bundleFromDir, ensureConfigDefaults, exportConfig, importBundle, listAgentProfiles, listPresets, listSeeds, writeBundle, type ConfigBundle } from "./config-db.ts";
+import { activeSeeds, bundleFromDir, ensureConfigDefaults, exportConfig, importBundle, listAgentProfiles, listPresets, listSeeds, writeBundle, type ConfigBundle } from "./config-db.ts";
 import { listWorlds, migrateWorldDirs, type WorldSummary } from "./controller/worlds.ts";
 import { CODEX_AUTH_PATH, SECRETS_DIR } from "./controller/index.ts";
 import { startDashboard } from "./dashboard/server.ts";
@@ -627,27 +627,26 @@ const commands: Record<string, (args: string[]) => Promise<void> | void> = {
         const written = base ? writeBundle(await call<ConfigBundle>(base, "GET", "/config"), dir) : exportConfig(db!, dir);
         return json ? out(written) : console.log(written.map((f) => `wrote ${f}`).join("\n") || "nothing to export");
       }
+      type SeedMeta = { id: number; name: string; active: number; created_at: number; sha256: string; note: string | null };
       if (sub === "seeds") {
-        const seeds = base ? await call<{ id: number; active: number; created_at: number; sha256: string; note: string | null }[]>(base, "GET", "/seeds") : listSeeds(db!).map(({ text: _t, ...s }) => s);
+        const seeds = base ? await call<SeedMeta[]>(base, "GET", "/seeds") : listSeeds(db!).map(({ text: _t, ...s }) => s);
         if (json) return out(seeds);
-        return console.log(table([["version", "active", "created", "sha256", "note"], ...seeds.map((s) => [`v${s.id}`, s.active ? "yes" : "", new Date(s.created_at).toISOString().slice(0, 16), s.sha256.slice(0, 12), s.note ?? ""])]));
+        return console.log(table([["seed", "version", "active", "created", "sha256", "note"], ...seeds.map((s) => [s.name, `v${s.id}`, s.active ? "yes" : "", new Date(s.created_at).toISOString().slice(0, 16), s.sha256.slice(0, 12), s.note ?? ""])]));
       }
       if (sub === "list" || !sub) {
-        let summary: { presets: string[]; agents: string[]; seed: { version: number; sha256: string } | null };
+        let summary: { presets: string[]; agents: string[]; seeds: { name: string; version: number; sha256: string }[] };
+        const active = (seeds: SeedMeta[]) => seeds.filter((s) => s.active).map((s) => ({ name: s.name, version: s.id, sha256: s.sha256 }));
         if (base) {
           const b = await call<ConfigBundle>(base, "GET", "/config");
-          const seeds = await call<{ id: number; active: number; sha256: string }[]>(base, "GET", "/seeds");
-          const s = seeds.find((x) => x.active);
-          summary = { presets: Object.keys(b.presets), agents: Object.keys(b.agents), seed: s ? { version: s.id, sha256: s.sha256 } : null };
+          summary = { presets: Object.keys(b.presets), agents: Object.keys(b.agents), seeds: active(await call<SeedMeta[]>(base, "GET", "/seeds")) };
         } else {
           ensureConfigDefaults(db!);
-          const s = activeSeed(db!);
-          summary = { presets: listPresets(db!).map((p) => p.name), agents: listAgentProfiles(db!).map((a) => a.name), seed: s ? { version: s.id, sha256: s.sha256 } : null };
+          summary = { presets: listPresets(db!).map((p) => p.name), agents: listAgentProfiles(db!).map((a) => a.name), seeds: active(activeSeeds(db!)) };
         }
         if (json) return out(summary);
         console.log(`presets: ${summary.presets.join(", ") || "none"}`);
         console.log(`agent profiles: ${summary.agents.join(", ") || "none"}`);
-        console.log(`seed: ${summary.seed ? `v${summary.seed.version} (${summary.seed.sha256.slice(0, 12)})` : "none"}`);
+        console.log(`seeds: ${summary.seeds.map((s) => `${s.name} v${s.version} (${s.sha256.slice(0, 12)})`).join(", ") || "none"}`);
         return;
       }
     } catch (e) {

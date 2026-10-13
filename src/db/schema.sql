@@ -170,11 +170,12 @@ CREATE TABLE IF NOT EXISTS extensions (
 -- seed_text, pricing_yaml).
 CREATE TABLE IF NOT EXISTS seeds (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,   -- the version
+  name        TEXT NOT NULL DEFAULT 'default',     -- the seed (presets pick one by name); versions are per name
   text        TEXT NOT NULL,
   sha256      TEXT NOT NULL,
   note        TEXT,
   created_at  INTEGER NOT NULL,
-  active      INTEGER NOT NULL DEFAULT 0           -- exactly one active
+  active      INTEGER NOT NULL DEFAULT 0           -- exactly one active per name
 );
 CREATE TABLE IF NOT EXISTS agent_profiles (
   name        TEXT PRIMARY KEY,

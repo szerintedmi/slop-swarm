@@ -156,19 +156,21 @@ describe("prompt + status", () => {
     expect(seed).toBe("You are wren. Forge http://f:3000. Sleep 1h 30m.\n");
     expect(humanDuration(45_000)).toBe("45s");
     expect(humanDuration(60 * MIN)).toBe("1h");
-    // The shipped seed has no placeholder left once filled, and never mentions the world end.
-    const shipped = fillSeed(readFileSync("config/seed.md", "utf8"), { name: "x", forgeUrl: "http://f:3000", maxSleepMs: MIN });
-    expect(shipped).not.toMatch(/\{[a-z_]+\}/);
-    expect(shipped).not.toMatch(/commons|outbox|inbox|STATUS\.md|world ends|until \d/);
-    // Agents are told notifications wake them, so they don't wake just to check.
-    expect(shipped).toContain("wakes you sooner");
-    // The GitHub line is there only when the run has the outlet.
-    expect(shipped).not.toContain("GitHub");
-    const withGh = fillSeed(readFileSync("config/seed.md", "utf8"), { name: "x", forgeUrl: "http://f:3000", maxSleepMs: MIN, github: { org: "o", user: "u" } });
-    expect(withGh).not.toMatch(/\{[a-z_]+\}/);
-    expect(withGh).toContain("github.com/o");
-    expect(withGh).toContain("publish what's useful there\nearly");
-    expect(withGh).toContain("Sign what you publish as x");
+    // The shipped seeds have no placeholder left once filled, and never mention the world end.
+    for (const file of ["default", "shock"]) {
+      const shipped = fillSeed(readFileSync(`config/seeds/${file}.md`, "utf8"), { name: "x", forgeUrl: "http://f:3000", maxSleepMs: MIN });
+      expect(shipped).not.toMatch(/\{[a-z_]+\}/);
+      expect(shipped).not.toMatch(/commons|outbox|inbox|STATUS\.md|world ends|until \d/);
+      // Agents are told notifications wake them, so they don't wake just to check.
+      expect(shipped).toContain("wakes you sooner");
+      // The GitHub line is there only when the run has the outlet.
+      expect(shipped).not.toContain("GitHub");
+      const withGh = fillSeed(readFileSync(`config/seeds/${file}.md`, "utf8"), { name: "x", forgeUrl: "http://f:3000", maxSleepMs: MIN, github: { org: "o", user: "u" } });
+      expect(withGh).not.toMatch(/\{[a-z_]+\}/);
+      expect(withGh).toContain("github.com/o");
+      expect(withGh).toContain("publish what's useful there\nearly");
+      expect(withGh).toContain("Sign what you publish as x");
+    }
   });
 
   test("wake note: when, why, budget and limits; unread only when there is some; no world end", () => {

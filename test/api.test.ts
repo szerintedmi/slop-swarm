@@ -165,7 +165,7 @@ describe("api", () => {
   test("config: presets and agents validated on save, seeds versioned, the bundle", async () => {
     const { req, db } = setup();
     ensureConfigDefaults(db);
-    expect((await req("GET", "/presets")).json.map((p: { name: string }) => p.name)).toEqual(["smoke", "swarm"]);
+    expect((await req("GET", "/presets")).json.map((p: { name: string }) => p.name)).toEqual(["shock", "smoke", "swarm"]);
     const bad = await req("PUT", "/agents/bramble", { yaml: "name: bramble\nharness: gemini\nmodel: m\n" });
     expect(bad.status).toBe(400);
     expect(bad.json.error).toMatch(/harness/);
@@ -173,12 +173,26 @@ describe("api", () => {
     expect(ok.status).toBe(200);
     expect((await req("PUT", "/presets/mine", { yaml: "agents: [zed]\n" })).json.error).toMatch(/run: expected a mapping/);
     const seeds = (await req("GET", "/seeds")).json;
+    expect(seeds.map((s: { name: string; id: number }) => [s.name, s.id])).toEqual([["default", 1], ["shock", 2]]);
     expect(seeds[0].text).toBeUndefined();
-    const v2 = await req("POST", "/seeds", { text: "You are {name} at {forge_url}.\n", note: "short" });
-    expect(v2.json).toMatchObject({ active: 1, note: "short" });
+    expect((await req("GET", "/seeds?name=shock")).json.map((s: { id: number }) => s.id)).toEqual([2]);
+    // A new version of the default seed (no name given), then the old one active again.
+    const v3 = await req("POST", "/seeds", { text: "You are {name} at {forge_url}.\n", note: "short" });
+    expect(v3.json).toMatchObject({ name: "default", active: 1, note: "short" });
     expect((await req("POST", `/seeds/${seeds[0].id}/activate`, {})).json.id).toBe(seeds[0].id);
+    // A new named seed, a preset on it, and the delete guards.
+    expect((await req("POST", "/seeds", { name: "calm", text: "You are {name} at {forge_url}. Calm.\n" })).json).toMatchObject({ name: "calm", id: 4, active: 1 });
+    expect((await req("POST", "/seeds", { name: "Bad", text: "You are {name} at {forge_url}.\n" })).status).toBe(400);
+    const smoke = (await req("GET", "/presets/smoke")).json.yaml;
+    expect((await req("PUT", "/presets/calmer", { yaml: smoke.replace("seed: default", "seed: calm") })).status).toBe(200);
+    expect((await req("PUT", "/presets/ghostly", { yaml: smoke.replace("seed: default", "seed: ghost") })).json.error).toMatch(/no seed ghost/);
+    expect((await req("DELETE", "/seeds/calm", undefined)).json.error).toMatch(/preset\(s\) calmer/);
+    expect((await req("DELETE", "/seeds/default", undefined)).status).toBe(400);
+    expect((await req("DELETE", "/presets/calmer", undefined)).status).toBe(200);
+    expect((await req("DELETE", "/seeds/calm", undefined)).json).toEqual({ ok: true });
     const bundle = (await req("GET", "/config")).json;
     expect(Object.keys(bundle.agents)).toContain("zed");
+    expect(Object.keys(bundle.seeds)).toEqual(["default", "shock"]);
     expect((await req("DELETE", "/agents/fern", undefined)).json.error).toMatch(/smoke/);
   });
 
