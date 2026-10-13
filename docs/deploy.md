@@ -96,7 +96,8 @@ deploy user with its forced command, keys-only sshd. It is idempotent and never 
 8. Migrate existing data (optional): stop local runs, then `rsync -a data/ slopswarm-vps:/var/lib/slopswarm/` (the
    DB, worlds, runs). The next controller start moves pre-world runs into worlds.
 
-Re-run `bootstrap.sh` after changing `deploy/vps/` or `deploy/slopswarm-deploy`; it only rewrites what changed.
+Re-run `bootstrap.sh` after changing `deploy/vps/`; it only rewrites what changed. `deploy/slopswarm-deploy` updates
+itself: every deploy installs the image's copy when it differs and re-runs with it.
 Upgrades of Docker and Tailscale are by hand, between runs: `sudo apt-get install --only-upgrade docker-ce
 docker-ce-cli containerd.io docker-compose-plugin tailscale` (Docker's `live-restore` keeps the containers up;
 restarting tailscaled drops this SSH session, so run it detached: `sudo systemd-run --unit=ts-upgrade sh -c
@@ -130,7 +131,8 @@ Before relying on a laptop runner, check that a forwarder container reaches the 
 both to GHCR by digest, joins the tailnet as `tag:ci`, and runs `deploy <controller@digest> <agent@digest>` through the
 forced command. Secrets: see the workflow header.
 
-What a deploy does ([deploy/slopswarm-deploy](../deploy/slopswarm-deploy)): one at a time (lock); pulls; if the DB
+What a deploy does ([deploy/slopswarm-deploy](../deploy/slopswarm-deploy)): one at a time (lock); pulls; installs the
+image's copy of itself when it differs and re-runs with it; if the DB
 schema changed (`org.slopswarm.schema`), waits until no run is active (6 h at most); copies `compose.yaml` and the
 `Caddyfile` out of the image; `docker compose up -d` (and restarts Caddy when the Caddyfile changed); health-checks the API; rolls back to the previous digests if the
 new controller doesn't come up.

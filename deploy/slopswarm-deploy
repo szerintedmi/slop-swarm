@@ -5,6 +5,8 @@
 # SSH_ORIGINAL_COMMAND: deploy <controller image@digest> [<agent image@digest>] (sudoers keeps it: env_keep in
 # /etc/sudoers.d/slopswarm-deploy, written by bootstrap.sh; without it the argument line is lost and this fails with usage).
 # Also by hand, for a rollback: sudo slopswarm-deploy deploy <previous controller@digest> [<agent@digest>]
+# The image carries this script too: when its copy differs, the deploy installs it here and re-runs itself with it, so
+# a merged change reaches the VPS with the next deploy (bootstrap.sh only installs the first one).
 #
 # Deploys don't kill wakes: the controller gets SIGTERM, detaches (the run keeps going on the agent host), and the
 # new controller resumes the run and follows its wakes. When the DB schema changes (the image's
@@ -14,6 +16,7 @@ set -eu
 DIR=/opt/slopswarm
 ENV_FILE=/etc/slopswarm/slopswarm.env
 LOCK=/run/lock/slopswarm-deploy.lock
+SELF=/usr/local/bin/slopswarm-deploy
 WAIT_MAX_S=${SLOPSWARM_DEPLOY_WAIT_S:-21600}
 IMAGE_RE='^ghcr\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$'
 
@@ -29,10 +32,32 @@ echo "$CONTROLLER" | grep -Eq "$IMAGE_RE" || fail "controller: expected ghcr.io/
 [ -r "$ENV_FILE" ] || fail "$ENV_FILE missing"
 
 mkdir -p "$DIR"
-exec 9>"$LOCK"
-flock -n 9 || fail "another deploy is running"
+# A re-run with the image's copy of this script (below) inherits the lock on fd 9.
+if [ -z "${SLOPSWARM_DEPLOY_REEXEC:-}" ]; then
+  exec 9>"$LOCK"
+  flock -n 9 || fail "another deploy is running"
+fi
 
 docker pull -q "$CONTROLLER" >/dev/null
+
+# compose.yaml, the Caddyfile and this script ship inside the image.
+cid=$(docker create "$CONTROLLER")
+trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
+
+# This script, from the image: install it when it differs and re-run with it (once). Written next to the old one and
+# moved over it, so this shell keeps reading the old file. An image without it keeps the installed script.
+if [ -z "${SLOPSWARM_DEPLOY_REEXEC:-}" ] && docker cp "$cid:/app/deploy/slopswarm-deploy" "$SELF.new" 2>/dev/null; then
+  if cmp -s "$SELF.new" "$SELF"; then
+    rm -f "$SELF.new"
+  else
+    chmod 0755 "$SELF.new"
+    mv "$SELF.new" "$SELF"
+    echo "deploy: installed the image's slopswarm-deploy; running it"
+    docker rm -f "$cid" >/dev/null 2>&1 || true
+    unset SSH_ORIGINAL_COMMAND
+    SLOPSWARM_DEPLOY_REEXEC=1 exec "$SELF" deploy "$CONTROLLER" "$AGENT"
+  fi
+fi
 
 # The previous images, for a rollback if the new controller doesn't come up.
 PREV_CONTROLLER=""
@@ -63,9 +88,6 @@ if [ -n "$old_schema" ] && [ "$new_schema" != "$old_schema" ]; then
   done
 fi
 
-# compose.yaml and the Caddyfile ship inside the image.
-cid=$(docker create "$CONTROLLER")
-trap 'docker rm -f "$cid" >/dev/null 2>&1 || true' EXIT
 docker cp "$cid:/app/deploy/compose.yaml" "$DIR/compose.yaml.new"
 docker cp "$cid:/app/deploy/Caddyfile" "$DIR/Caddyfile.new"
 # A changed Caddyfile needs a Caddy restart: compose doesn't recreate it for a file's contents, and the single-file
