@@ -1,9 +1,9 @@
 // The runner daemon (docs/plans/2026-10-12-hosted-control-plane.md §2.3): `just runner` on an agent host, or started
 // in-process by `just up` on the laptop. Env:
-//   RUNNER_TOKEN     shared bearer token (required; the controller has the same value)
-//   RUNNER_DATA_DIR  agent dirs, wake output, logs (default: <data>/runner)
-//   RUNNER_HOST      bind address (default 127.0.0.1; the agent host's tailnet address when the controller is remote)
-//   RUNNER_PORT      default 7701
+//   SLOPSWARM_RUNNER_TOKEN     shared bearer token (required; the controller has the same value)
+//   SLOPSWARM_RUNNER_DATA_DIR  agent dirs, wake output, logs (default: <data>/runner)
+//   SLOPSWARM_RUNNER_HOST      bind address (default 127.0.0.1; the agent host's tailnet address when the controller is remote)
+//   SLOPSWARM_RUNNER_PORT      default 7701
 import { join } from "node:path";
 import { dataDir } from "../db/index.ts";
 import { dockerInfra, dockerRuntime } from "./containers.ts";
@@ -12,7 +12,7 @@ import { Runner } from "./runner.ts";
 export const DEFAULT_RUNNER_PORT = 7701;
 
 export function runnerDataDir(): string {
-  return process.env.RUNNER_DATA_DIR?.trim() || join(dataDir(), "runner");
+  return process.env.SLOPSWARM_RUNNER_DATA_DIR?.trim() || join(dataDir(), "runner");
 }
 
 /** Start a runner and serve it. `port: 0` picks a free port. */
@@ -53,13 +53,13 @@ if (import.meta.main) {
     console.error(`error: ${problem} (RUNNER_ALLOW_ANY_UID=1 to start anyway)`);
     process.exit(1);
   }
-  const token = process.env.RUNNER_TOKEN?.trim();
+  const token = process.env.SLOPSWARM_RUNNER_TOKEN?.trim();
   if (!token) {
-    console.error("error: RUNNER_TOKEN is not set");
+    console.error("error: SLOPSWARM_RUNNER_TOKEN is not set");
     process.exit(1);
   }
-  const port = Number(process.env.RUNNER_PORT ?? DEFAULT_RUNNER_PORT);
-  const r = await serveRunner({ token, host: process.env.RUNNER_HOST?.trim() || "127.0.0.1", port });
+  const port = Number(process.env.SLOPSWARM_RUNNER_PORT ?? DEFAULT_RUNNER_PORT);
+  const r = await serveRunner({ token, host: process.env.SLOPSWARM_RUNNER_HOST?.trim() || "127.0.0.1", port });
   r.runner.log.info(`runner listening on ${r.url} (data: ${runnerDataDir()})`);
   const quit = () => {
     // Wakes keep running: a restarted runner reattaches to them.

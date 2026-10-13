@@ -69,14 +69,14 @@ export interface AgentHostHandle {
 }
 
 /**
- * The runner to use: SLOPSWARM_RUNNER_URL + RUNNER_TOKEN for a runner elsewhere (the agent host), else one started in
+ * The runner to use: SLOPSWARM_RUNNER_URL + SLOPSWARM_RUNNER_TOKEN for a runner elsewhere (the agent host), else one started in
  * this process on localhost (the laptop: one code path, the same an ephemeral VM will use).
  */
 export async function connectAgentHost(env = process.env): Promise<AgentHostHandle> {
   const url = env.SLOPSWARM_RUNNER_URL?.trim();
   if (url) {
-    const token = env.RUNNER_TOKEN?.trim();
-    if (!token) throw new LaunchError("SLOPSWARM_RUNNER_URL is set but RUNNER_TOKEN is not");
+    const token = env.SLOPSWARM_RUNNER_TOKEN?.trim();
+    if (!token) throw new LaunchError("SLOPSWARM_RUNNER_URL is set but SLOPSWARM_RUNNER_TOKEN is not");
     return { host: new RunnerHost({ url, token }), url, local: false, stop: () => {} };
   }
   const token = Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString("base64url");

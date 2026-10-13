@@ -40,11 +40,11 @@ forge-upgrade world image:
 worlds *args:
     {{cli}} worlds {{args}}
 
-# the runner daemon for an agent host (env: RUNNER_TOKEN, RUNNER_HOST, RUNNER_PORT, RUNNER_DATA_DIR); `just up` starts one in-process otherwise
+# the runner daemon for an agent host (env: SLOPSWARM_RUNNER_TOKEN, SLOPSWARM_RUNNER_HOST, SLOPSWARM_RUNNER_PORT, SLOPSWARM_RUNNER_DATA_DIR); `just up` starts one in-process otherwise
 runner:
     {{cli}} runner
 
-# the controller service in the foreground, idle until a launch (dashboard + API on :7777; the VPS runs this); env: SLOPSWARM_BIND, SLOPSWARM_API_TOKEN, SLOPSWARM_RUNNER_URL + RUNNER_TOKEN, SLOPSWARM_ALL_FORGES, SLOPSWARM_FORGE_PUBLISH
+# the controller service in the foreground, idle until a launch (dashboard + API on :7777; the VPS runs this); env: SLOPSWARM_BIND, SLOPSWARM_API_TOKEN, SLOPSWARM_RUNNER_URL + SLOPSWARM_RUNNER_TOKEN, SLOPSWARM_ALL_FORGES, SLOPSWARM_FORGE_PUBLISH
 serve:
     {{cli}} serve
 

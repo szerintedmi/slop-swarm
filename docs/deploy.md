@@ -111,7 +111,7 @@ A second checkout on the laptop (or a VM), on the tailnet with `tag:swarm-agents
 
 ```sh
 just setup                                  # images, proxy, networks
-RUNNER_TOKEN=… RUNNER_HOST=<agent host tailnet IP> just runner
+SLOPSWARM_RUNNER_TOKEN=… SLOPSWARM_RUNNER_HOST=<agent host tailnet IP> just runner
 ```
 
 The runner applies the host config the controller pushes (`config/host.yaml`: allowlist, container limits), pulls the
