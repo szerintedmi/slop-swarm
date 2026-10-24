@@ -8,7 +8,7 @@ import { worldAgentDirs, worldDirs } from "./db/index.ts";
 import { MOUNTS } from "./docker.ts";
 import { GITHUB_GITCONFIG_IN } from "./github.ts";
 
-export const FORWARDER_IMAGE = "alpine/socat:1.8.0.3";
+export const FORWARDER_IMAGE = "alpine/socat:1.8.1.3";
 /** The compose network with a route out (docker/compose.yaml); only the forwarder joins it, to publish its port. */
 export const EGRESS_NETWORK = "slopswarm-egress";
 const FORGE_PORT_IN = 3000;

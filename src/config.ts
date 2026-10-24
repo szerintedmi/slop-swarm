@@ -111,7 +111,7 @@ export const DEFAULT_OPENROUTER_KEY_ENV = "OPEN_ROUTER_API_KEY";
 export const OPENROUTER_DOMAIN = "openrouter.ai";
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-export const DEFAULT_FORGE_IMAGE = "codeberg.org/forgejo/forgejo:16.0.4-rootless";
+export const DEFAULT_FORGE_IMAGE = "codeberg.org/forgejo/forgejo:16.0.6-rootless";
 
 export function parseAgent(raw: unknown, defaultBudget: number, source: string): AgentConfig {
   const a = obj(raw, source);
