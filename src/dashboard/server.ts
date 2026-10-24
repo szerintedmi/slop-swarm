@@ -1,6 +1,6 @@
 // Embed the SvelteKit Fetch handler in the controller's Bun process.
 import type { Database } from 'bun:sqlite';
-import type { Server as KitServer, SSRManifest } from '@sveltejs/kit';
+import type { Server as KitServer } from '@sveltejs/kit';
 import { readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -45,9 +45,7 @@ async function loadKit(): Promise<Kit> {
   let kit = kits.get(dir);
   if (!kit) {
     kit = (async () => {
-      const { Server } = await import(pathToFileURL(join(dir, 'server/index.js')).href) as { Server: new (manifest: SSRManifest) => KitServer };
-      const { manifest } = await import(pathToFileURL(join(dir, 'server/manifest.js')).href) as { manifest: SSRManifest };
-      const kit = new Server(manifest);
+      const { server: kit } = await import(pathToFileURL(join(dir, 'server/instance.js')).href) as { server: KitServer };
       // No application secrets need to be exposed to SvelteKit's environment modules.
       await kit.init({ env: {} });
       const assets = new Map<string, string>();

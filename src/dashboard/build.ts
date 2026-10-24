@@ -23,11 +23,11 @@ function sourceHash() {
   }
   walk(join(projectRoot, 'src/dashboard'));
   if (existsSync(join(projectRoot, 'static'))) walk(join(projectRoot, 'static'));
-  for (const name of ['svelte.config.js', 'vite.config.ts', 'package.json', 'bun.lock', 'tsconfig.ui.json', 'tsconfig.json']) hash.update(readFileSync(join(projectRoot, name)));
+  for (const name of ['vite.config.ts', 'package.json', 'bun.lock', 'tsconfig.ui.json', 'tsconfig.json']) hash.update(readFileSync(join(projectRoot, name)));
   return hash.digest('hex').slice(0, 16);
 }
 
-const complete = (dir: string) => existsSync(join(dir, 'server/manifest.js'));
+const complete = (dir: string) => existsSync(join(dir, 'server/instance.js'));
 
 // vite writes .svelte-kit/ in place, so concurrent builds (two worktree commands) take turns.
 async function withLock<T>(fn: () => Promise<T>): Promise<T> {

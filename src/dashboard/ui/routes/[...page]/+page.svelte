@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { PageProps } from './$types';
-  import Overview from '$lib/Overview.svelte'; import Agents from '$lib/Agents.svelte'; import Agent from '$lib/Agent.svelte'; import Events from '$lib/Events.svelte'; import Wake from '$lib/Wake.svelte'; import FileViewer from '$lib/FileViewer.svelte'; import Chip from '$lib/Chip.svelte'; import Worlds from '$lib/Worlds.svelte'; import World from '$lib/World.svelte'; import Config from '$lib/Config.svelte';
+  import Overview from '#lib/Overview.svelte'; import Agents from '#lib/Agents.svelte'; import Agent from '#lib/Agent.svelte'; import Events from '#lib/Events.svelte'; import Wake from '#lib/Wake.svelte'; import FileViewer from '#lib/FileViewer.svelte'; import Chip from '#lib/Chip.svelte'; import Worlds from '#lib/Worlds.svelte'; import World from '#lib/World.svelte'; import Config from '#lib/Config.svelte';
   let { data }: PageProps = $props();
   const m = $derived(data.model);
   const title = $derived(m.kind === 'overview' ? m.run.name : m.kind === 'agent' ? m.agent.name : m.kind === 'wake' ? `${m.wake.agent} #${m.wake.seq}` : m.kind === 'events' ? 'Raw events' : m.kind === 'file' ? 'File' : m.kind === 'agents' ? 'Agents' : m.kind === 'worlds' ? 'Worlds' : m.kind === 'world' ? `World ${m.world.id}` : m.kind === 'config' ? 'Config' : 'Slop Swarm');
