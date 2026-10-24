@@ -36,6 +36,6 @@ webfetch:
   max_redirects: 5          # each hop is re-checked (public address, port 80/443)
 
 forge:                      # the run's Forgejo, the agents' shared world (plan §4.5)
-  image: codeberg.org/forgejo/forgejo:16.0.4-rootless
+  image: codeberg.org/forgejo/forgejo:16.0.6-rootless
   port: 3300                # your view: http://127.0.0.1:3300 (FORGE_PORT=… overrides)
   poll_s: 5                 # how often sleeping agents' unread notifications are checked

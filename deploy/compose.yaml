@@ -35,7 +35,7 @@ services:
   # The public read-only forge (§7): on only with `--profile public` (slopswarm-deploy adds it when the env file has
   # PUBLIC_FORGE_DOMAIN). Ports 80/443 on the public interface; everything goes to the controller's public proxy.
   caddy:
-    image: caddy:2.8.4
+    image: caddy:2.11.7
     container_name: slopswarm-caddy
     profiles: [public]
     restart: unless-stopped

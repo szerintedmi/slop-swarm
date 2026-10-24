@@ -36,6 +36,6 @@ browsercheck:
   timeout_s: 120            # one run gives up after this (10–600, under per_wake.timeout_min); agents can only lower it
 
 forge:                      # the run's Forgejo, the agents' shared world (plan §4.5)
-  image: codeberg.org/forgejo/forgejo:16.0.4-rootless
+  image: codeberg.org/forgejo/forgejo:16.0.6-rootless
   port: 3300                # your view: http://127.0.0.1:3300 (FORGE_PORT=… overrides)
   poll_s: 5                 # how often sleeping agents' unread notifications are checked

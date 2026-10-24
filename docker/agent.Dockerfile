@@ -1,21 +1,21 @@
 # Agent image: one ephemeral container per wake (plan §7). CLI versions are pinned.
-FROM node:22-bookworm-slim
+FROM node:24.22.1-trixie-slim
 
-ARG CLAUDE_CODE_VERSION=2.1.296
-ARG CODEX_VERSION=0.162.1
-# pi (OpenRouter agents); needs Node >= 22.19, which node:22 has.
-ARG PI_VERSION=1.1.0
+ARG CLAUDE_CODE_VERSION=2.1.310
+ARG CODEX_VERSION=0.164.0
+# pi (OpenRouter agents); needs Node >= 22.19 (Node 24 LTS here).
+ARG PI_VERSION=1.4.0
 # browsercheck (docker/browsercheck.mjs): headless Chromium (Debian's) driven by puppeteer-core, for agents testing
 # what they build for the browser.
-ARG PUPPETEER_CORE_VERSION=25.11.0
+ARG PUPPETEER_CORE_VERSION=25.16.0
 # Gitea's CLI, for the run's forge (plan §4.5). Checksums of the release's .xz assets.
 ARG TEA_VERSION=0.16.0
 ARG TEA_SHA256_ARM64=7ebeb8783ac0d69a1cac545e5a0d8f0c7dd7d6e943e73b32dfc051ef7686a60b
 ARG TEA_SHA256_AMD64=92e0c966c98be0c6ca4c80b1912d08ff7887c7cb55e123542fa541842d875149
 # GitHub's CLI, for the GitHub outlet (plan §4.6). Checksums of the release's .tar.gz assets.
-ARG GH_VERSION=2.101.0
-ARG GH_SHA256_ARM64=b57e8063f18862647c9d22727c32e9da1b963f8bf9db648fe123a6975695640f
-ARG GH_SHA256_AMD64=9bca2d1c16825f109907a23307628a2f0698fbf99662b73a5cf0b020293072b8
+ARG GH_VERSION=2.103.2
+ARG GH_SHA256_ARM64=4c3e99a50bd8b181a3fe9d69b25dd978bac768148d88f01507c6b4d1ef61a443
+ARG GH_SHA256_AMD64=62ccf747115ddc61237efffdde66a3c8f70ba249433dc64f70801089b59c59c8
 ARG TARGETARCH
 
 RUN apt-get update \
@@ -47,7 +47,7 @@ RUN cd /opt/browsercheck \
  && npm cache clean --force \
  && ln -s /opt/browsercheck/browsercheck.mjs /usr/local/bin/browsercheck
 
-# node:22 ships a `node` user with uid 1000; rename it to `agent` so files on the bind mounts line up.
+# The node image ships a `node` user with uid 1000; rename it to `agent` so files on the bind mounts line up.
 RUN usermod -l agent -d /home/agent -m node && groupmod -n agent node
 
 LABEL org.slopswarm.claude-code="${CLAUDE_CODE_VERSION}" \

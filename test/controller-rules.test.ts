@@ -66,7 +66,7 @@ describe("config", () => {
     expect(ok.agents[0]!.budgetUsd).toBe(0.25);
     expect(ok.agents[0]!.effort).toBe("medium");
     // Optional sections and settings get their defaults.
-    expect(ok.forge).toEqual({ image: "codeberg.org/forgejo/forgejo:16.0.4-rootless", port: 3300, pollMs: 15_000 });
+    expect(ok.forge).toEqual({ image: "codeberg.org/forgejo/forgejo:16.0.6-rootless", port: 3300, pollMs: 15_000 });
     expect(ok.run.worldEndGraceMs).toBe(60_000);
     expect(ok.controller).toEqual({ tickMs: 5000 });
     expect(ok.github).toBeUndefined();

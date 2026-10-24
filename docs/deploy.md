@@ -122,7 +122,7 @@ the controller goes silent while wakes run, the runner kills them after `runner.
 hard timeout.
 
 Before relying on a laptop runner, check that a forwarder container reaches the VPS through OrbStack's NAT:
-`docker run --rm --network slopswarm-egress alpine/socat:1.8.0.3 -T3 - TCP:<vps tailnet IP>:3301 </dev/null && echo ok`.
+`docker run --rm --network slopswarm-egress alpine/socat:1.8.1.3 -T3 - TCP:<vps tailnet IP>:3301 </dev/null && echo ok`.
 
 ## 4. CI deploys
 
